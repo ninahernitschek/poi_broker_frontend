@@ -11,9 +11,8 @@ from flask_wtf.csrf import CSRFProtect, CSRFError
 #from werkzeug.middleware.profiler import ProfilerMiddleware
 #import jinja2
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import inspect
-#import orm
 from astropy.time import Time
+from .helpers import _env_bool
 
 # Initialize SQLAlchemy instance (outside create_app for import access)
 db = SQLAlchemy()
@@ -57,10 +56,14 @@ def create_app():
     if not secret_key:
         raise RuntimeError("SECRET_KEY environment variable must be set (generate with: python -c 'import secrets; print(secrets.token_hex(32))')")
 
+    debug_flag = _env_bool(os.environ.get('FLASK_DEBUG'), False)
+    testing_flag = _env_bool(os.environ.get('FLASK_TESTING'), False)
+    session_cookie_secure = _env_bool(os.environ.get('SESSION_COOKIE_SECURE'), not debug_flag)
+
     # Load config from environment variables; use safe defaults for development
     app.config.update(
-        DEBUG=os.environ.get('FLASK_DEBUG', 'False') == 'True',
-        TESTING=os.environ.get('FLASK_TESTING', 'False') == 'True',
+        DEBUG=debug_flag, # Shows detailed error pages with stack traces, and enables auto-reloading of code changes. Disable in production.
+        TESTING=testing_flag, # If True, Exceptions propagate rather than being caught by Flask's error handlers. Disable in production.
         TEMPLATES_AUTO_RELOAD=True,
         SQLALCHEMY_DATABASE_URI=db_uri,
         SQLALCHEMY_BINDS={
@@ -69,7 +72,7 @@ def create_app():
         SQLALCHEMY_TRACK_MODIFICATIONS=False,
         SECRET_KEY=secret_key, #Used by Flask to sign the session cookie data so users can't tamper with it.
         PERMANENT_SESSION_LIFETIME = timedelta(hours=24),
-        SESSION_COOKIE_SECURE = True,  # HTTPS only
+        SESSION_COOKIE_SECURE = session_cookie_secure,  # HTTPS only, unless in debug mode where we allow it for local testing
         SESSION_COOKIE_HTTPONLY = True,  # Prevent XSS
         SESSION_COOKIE_SAMESITE = 'Lax'  # CSRF protection
     )

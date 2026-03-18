@@ -4,6 +4,11 @@ import json
 from datetime import datetime
 from astropy.time import Time
 
+def _env_bool(value: str | None, default: bool) -> bool:
+    if value is None:
+        return default
+    return value.strip().lower() in {'1', 'true', 'yes', 'on'}
+
 # Helper for converting SQLAlchemy objects to dictionaries
 def object_as_dict(obj):
     return {c.key: getattr(obj, c.key)

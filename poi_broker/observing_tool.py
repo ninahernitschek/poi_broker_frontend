@@ -36,20 +36,36 @@ def calc_observing_plot():
 
     obs_loc = request.args.get('obs_loc') #EarthLocation.of_site('Rubin Observatory')
     obs_date = request.args.get('obs_date')
-    year, month, day = obs_date.split("-")
     obs_tz = request.args.get('obs_tz')
-    ra = float(request.args.get('ra'))
-    dec = float(request.args.get('dec'))
+    ra_value = request.args.get('ra')
+    dec_value = request.args.get('dec')
+
+    if not obs_loc or not obs_date or ra_value is None or dec_value is None:
+        return '<p>Missing required query parameters: obs_loc, obs_date, ra, dec</p>', 400
+
+    try:
+        year, month, day = obs_date.split("-")
+        ra = float(ra_value)
+        dec = float(dec_value)
+    except (ValueError, TypeError):
+        return '<p>Invalid parameter format. Expected obs_date=YYYY-MM-DD and numeric ra/dec.</p>', 400
 
     # Observatory location
-    observatory = EarthLocation.of_site(obs_loc) 
+    try:
+        observatory = EarthLocation.of_site(obs_loc)
+    except Exception:
+        return '<p>Unknown observatory location.</p>', 400
+
     obs_lon, obs_lat = observatory.lon.value, observatory.lat.value
     #0. do not generate any plots if the object is not visible from the observatory
     if (obs_lat - dec >=90):
-        return "<p>Object is not visible from your location: declination = {dec} degree, obervatory latitude {lat} degree</p>" 
+        return f"<p>Object is not visible from your location: declination = {dec} degree, observatory latitude {obs_lat} degree</p>"
 
     tf = TimezoneFinder()
-    tz = ZoneInfo(tf.timezone_at(lng=obs_lon, lat=obs_lat))
+    timezone_name = tf.timezone_at(lng=obs_lon, lat=obs_lat)
+    if timezone_name is None:
+        return '<p>Failed to determine timezone for selected observatory.</p>', 400
+    tz = ZoneInfo(timezone_name)
 
     #stellar_object = SkyCoord(ra=101.28715533*u.deg, dec=16.71611586*u.deg)
     stellar_object = SkyCoord(ra=ra*u.deg, dec=dec*u.deg)
@@ -204,7 +220,7 @@ def get_moon_phase_panel(observatory, midnight_utc, moon_separation):
     fraction_illuminated = (1 + np.cos(moon_phase_angle_inc))/2.0
     fraction_illuminated_percentage = "{:.0%}".format(fraction_illuminated)
     angle = np.arctan(np.cos(sun_midnight.dec) * np.sin(sun_midnight.ra - moon_midnight.ra), np.sin(sun_midnight.dec) * np.cos(moon_midnight.dec) -
-                np.cos(sun_midnight.dec) * np.sin(moon_midnight.dec) * np.cos(sun_midnight.ra - moon_midnight.ra))        
+                np.cos(sun_midnight.dec) * np.sin(moon_midnight.dec) * np.cos(sun_midnight.ra - moon_midnight.ra)) #technically, the 2nd parameter calls for arctan2, but we are only interested in the sign of the angle, so it does not matter if we use arctan or arctan2 here.
     phase = 0.5 + 0.5 * moon_phase_angle_inc.value * np.sign(angle.value) / np.pi
 
     phase_name=''

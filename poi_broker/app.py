@@ -33,7 +33,7 @@ def _format_mjd_cached(mjd_value: float) -> str:
     return  dt.strftime('%Y-%m-%d %H:%M:%S')
 
 
-@main_blueprint.route('/', methods=['GET', 'POST'])
+@main_blueprint.route('/', methods=['GET'])
 def start():
     #app.logger.info('Info')
     #app.logger.warning('Warn')
@@ -62,9 +62,14 @@ def start():
                 filter_warning_message += 'Date filter cannot be applied - Enter a valid 8-digit integer date of the form yyyymmdd, e.g. "20201207", or range, e.g., "20201207 20201209". You can filter the columns by entering values and then click the "Filter" button.'
 
         if request.args.get('alert_id'):
-            alertId = request.args.get('alert_id')
-            search = "{}%".format(alertId)
-            query = query.filter(Ztf.alert_id.like(search)) # allows for partial matching of alert_id to find alerts with aspecific prefix, e.g. ztf / lsst
+            alertId = request.args.get('alert_id', '').strip()
+            if re.match(r'^(?:ztf_candidate|lsst):\d{18,}$', alertId): # if it contains 18+ digits, we got a complete alert_id and can query it directly.
+                query = query.filter(Ztf.alert_id == alertId)
+            elif re.match(r'^(?:ztf|lsst)\D*$', alertId): # otherwise, we allow for partial matching of alert_id to find alerts with a specific prefix, e.g. ztf / lsst
+                search = "{}%".format(alertId)
+                query = query.filter(Ztf.alert_id.like(search))
+            elif alertId != '':
+                filter_warning_message += 'Alert ID cannot be filter by partial IDs - Enter a full alert ID, e.g. "ztf_candidate:335155568501", or "lsst:170094456539709554", or just the catalog prefix, e.g. "ztf" or "lsst".'
 
         if request.args.get('ztf_object_id'):
             query = query.filter(Ztf.ztf_object_id == request.args.get('ztf_object_id'))
@@ -381,6 +386,8 @@ def api_favorite_groups_delete(group_id):
     if not group:
         return jsonify({'error': 'group not found'}), 404
     
+    #Update favorites that belonged to this group to have group_id = null (ungrouped) instead of deleting them, so they are not lost and can be re-assigned to other groups by the user if desired.
+    Favorite.query.filter_by(group_id=group_id).update({'group_id': None})
     db.session.delete(group)
     db.session.commit()
     
@@ -600,8 +607,10 @@ def query_features():
         Ztf.feature_chi2_flux_g,
         Ztf.feature_skew_flux_g,
         Ztf.feature_stetson_k_flux_g))
-    data = object_as_dict(feature_query.first())
-    #print(data)
+    row = feature_query.first()
+    if row is None:
+        return Response(jsonify({'error': 'No feature record found for alert_id'}), status=404)
+    data = object_as_dict(row)
     
     response = current_app.response_class(
         response=json.dumps(data), 
@@ -626,10 +635,9 @@ def query_featureplot_data():
 
     #Features from args.get() - if none: select defaults
     if selected_features:
-        features_array = selected_features.split(',')
+        features_array = [f.strip() for f in selected_features.split(',') if f.strip()]
         if features_array and len(features_array) > 0:
-            feature_list = features_array
-            #print(feature_list)
+            feature_list = features_array[:10] # limit to 10 features for plotting
 
     #query where locus id equals selected id - build column list dynamically
     columns_to_load = [Ztf.date_alert_mjd, Ztf.ant_mag_corrected] + [getattr(Ztf, feature) for feature in feature_list]

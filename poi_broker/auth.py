@@ -12,6 +12,22 @@ from email.message import EmailMessage
 from email_validator import validate_email, EmailNotValidError
 import ssl
 
+
+def _utc_now_epoch() -> int:
+    return int(datetime.now(timezone.utc).timestamp())
+
+def _is_reset_token_expired(expires_at) -> bool:
+    if expires_at is None:
+        return True
+    if isinstance(expires_at, datetime):
+        expires_epoch = int(expires_at.timestamp())
+    else:
+        try:
+            expires_epoch = int(expires_at)
+        except (TypeError, ValueError):
+            return True
+    return expires_epoch < _utc_now_epoch()
+
 logger = logging.getLogger(__name__)
 auth_blueprint = Blueprint('auth', __name__)
 
@@ -182,7 +198,7 @@ def forgot_password_post():
     if user:
         # Generate reset token
         user.reset_token = secrets.token_urlsafe(32)
-        user.reset_token_expires = datetime.now(timezone.utc) + timedelta(hours=1)
+        user.reset_token_expires = _utc_now_epoch() + int(timedelta(hours=1).total_seconds())
         db.session.commit()
         
         # Send email with reset link and expiration time
@@ -202,7 +218,7 @@ def forgot_password_post():
 def reset_password(token):
     user = User.query.filter_by(reset_token=token).first()
     
-    if not user or user.reset_token_expires < datetime.now(timezone.utc):
+    if not user or _is_reset_token_expired(user.reset_token_expires):
         flash('Invalid or expired reset token')
         return redirect(url_for('auth.login'))
     
@@ -226,7 +242,7 @@ def reset_password_post(token):
         return redirect(url_for('auth.reset_password', token=token))
 
     user = User.query.filter_by(reset_token=token).first()
-    if not user or not user.reset_token_expires or user.reset_token_expires < datetime.now(timezone.utc):
+    if not user or _is_reset_token_expired(user.reset_token_expires):
         flash('Invalid or expired reset token')
         return redirect(url_for('auth.login'))
 

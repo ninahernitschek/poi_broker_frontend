@@ -54,24 +54,12 @@
 
             <!-- Groups tabs -->
             <ul class="nav nav-tabs" id="favoriteTabs" role="tablist">
-                <li class="nav-item">
-                    <a class="nav-link active" id="tab-all" data-toggle="tab" href="#panel-all" role="tab">
-                        Ungrouped <span class="badge badge-secondary ml-1" id="count-all">0</span>
-                    </a>
-                </li>
-                <li class="nav-item" id="groupTabsContainer">
-                    <!-- Tabs for groups injected here by JS -->
-                </li>
+                <!-- Tabs inserted entirely by JS -->
             </ul>
 
             <!-- Tab content -->
             <div class="tab-content" id="favoritePanels">
-                <div class="tab-pane fade show active" id="panel-all" role="tabpanel">
-                    <ul class="list-group list-group-flush" id="list-all">
-                        <li class="list-group-item text-muted text-center py-3">Loading...</li>
-                    </ul>
-                </div>
-                <!-- Group panels injected here by JS -->
+                <!-- Panels inserted entirely by JS -->
             </div>
 
         </div>
@@ -131,65 +119,125 @@ document.addEventListener('DOMContentLoaded', function () {
             if (data.error) {
                 alert('Error: ' + data.error);
             } else {
-                loadGroups();
+                loadGroups(getActiveTabId());
             }
         })
         .catch(e => console.error(e));
     });
 
-    function loadGroups() {
+    function getActiveTabId() {
+        const active = document.querySelector('#favoriteTabs .nav-link.active');
+        if (!active) return 'all';
+
+        const id = active.id.replace('tab-', '');
+        return id;
+    }
+
+    function loadGroups(activeTabId = null) {
         fetch('/api/favorite-groups')
             .then(r => r.json())
             .then(data => {
                 allGroups = data.groups || [];
-                const tabsContainer = document.getElementById('groupTabsContainer');
-                const panelsContainer = document.getElementById('favoritePanels');
-                tabsContainer.innerHTML = '';
+                populateGroupSelect();
 
-                // Update group select in modal
-                const groupSelect = document.getElementById('groupSelect');
-                groupSelect.innerHTML = '<option value="null">Ungrouped</option>';
-                allGroups.forEach(group => {
-                    if (group.id !== null) {
-                        const option = document.createElement('option');
-                        option.value = group.id;
-                        option.textContent = group.name;
-                        groupSelect.appendChild(option);
-                    }
-                });
+                const tabsEl = document.getElementById('favoriteTabs');
+                const panelsEl = document.getElementById('favoritePanels');
 
-                allGroups.forEach(group => {
-                    if (group.id === null) return; // skip "Ungrouped" in tabs
-                    
-                    const tabLi = document.createElement('li');
-                    tabLi.className = 'nav-item';
-                    tabLi.innerHTML = `
-                        <a class="nav-link" id="tab-group-${group.id}" data-toggle="tab" href="#panel-group-${group.id}" role="tab">
-                            ${group.name} <span class="badge badge-secondary ml-1">${group.count}</span>
-                            <button class="btn btn-xs btn-link text-danger ml-2 delete-group-btn" data-id="${group.id}" style="font-size:0.8em">×</button>
+                tabsEl.innerHTML = '';
+                panelsEl.innerHTML = '';
+
+                // Determine which tab should be active
+                if (!activeTabId) {
+                    activeTabId = 'all';
+                }
+
+                // --- Helper to create a tab ---
+                function createTab(id, label, count, isActive, isGroup = false) {
+                    const tabId = `tab-${id}`;
+                    const panelId = `panel-${id}`;
+
+                    const li = document.createElement('li');
+                    li.className = 'nav-item';
+
+                    li.innerHTML = `
+                        <a class="nav-link ${isActive ? 'active' : ''}"
+                        id="${tabId}"
+                        data-toggle="tab"
+                        href="#${panelId}"
+                        role="tab">
+                            ${label}
+                            <span class="badge badge-secondary ml-1">${count}</span>
+                            ${isGroup ? `<button class="btn btn-xs btn-link text-danger ml-2 delete-group-btn" data-id="${id}" style="font-size:0.8em">×</button>` : ''}
                         </a>
                     `;
-                    tabsContainer.appendChild(tabLi);
+
+                    tabsEl.appendChild(li);
 
                     const panel = document.createElement('div');
-                    panel.className = 'tab-pane fade';
-                    panel.id = `panel-group-${group.id}`;
-                    panel.innerHTML = `<ul class="list-group list-group-flush" id="list-group-${group.id}"><li class="list-group-item text-muted text-center py-3">Loading...</li></ul>`;
-                    panelsContainer.appendChild(panel);
+                    panel.className = `tab-pane fade ${isActive ? 'show active' : ''}`;
+                    panel.id = panelId;
 
-                    loadFavorites(group.id);
+                    panel.innerHTML = `
+                        <ul class="list-group list-group-flush" id="list-${id}">
+                            <li class="list-group-item text-muted text-center py-3">Loading...</li>
+                        </ul>
+                    `;
+
+                    panelsEl.appendChild(panel);
+
+                    // Load favorites for this tab
+                    loadFavorites(id === 'all' ? null : id);
+                }
+
+                // --- Create "Ungrouped" tab ---
+                const ungrouped = allGroups.find(g => g.id === null);
+                createTab(
+                    'all',
+                    'Ungrouped',
+                    ungrouped?.count || 0,
+                    activeTabId === 'all'
+                );
+
+                // --- Create group tabs ---
+                allGroups.forEach(group => {
+                    if (group.id === null) return;
+
+                    createTab(
+                        group.id,
+                        group.name,
+                        group.count,
+                        String(activeTabId) === String(group.id),
+                        true
+                    );
                 });
 
-                // Update counts
-                document.getElementById('count-all').textContent = allGroups.find(g => g.id === null)?.count || 0;
-                loadFavorites(null); // Load "All" tab
+                // --- Activate tab explicitly if needed (in case it was lost during re-render) ---
+                const activeLink = document.querySelector(`#tab-${activeTabId}`);
+                if (activeLink) {
+                    $(activeLink).tab('show');
+                }
             })
             .catch(e => console.error(e));
     }
 
+    function populateGroupSelect() {
+        const groupSelect = document.getElementById('groupSelect');
+
+        groupSelect.innerHTML = '<option value="null">Ungrouped</option>';
+
+        allGroups.forEach(group => {
+            if (group.id === null) return;
+
+            const option = document.createElement('option');
+            option.value = group.id;
+            option.textContent = group.name;
+            groupSelect.appendChild(option);
+        });
+    }
+
     function loadFavorites(groupId) {
         const url = groupId === null ? '/api/favorites?groupId=null' : `/api/favorites?groupId=${groupId}`;
-        const listId = groupId === null ? 'list-all' : `list-group-${groupId}`;
+        const listId = groupId === null ? 'list-all' : `list-${groupId}`;
 
         fetch(url)
             .then(r => r.json())
@@ -236,6 +284,7 @@ document.addEventListener('DOMContentLoaded', function () {
             currentFavId = btn.dataset.favId;
             const locus = btn.dataset.locus;
             document.getElementById('moveToGroupText').textContent = `Move "${locus}" to:`;
+            populateGroupSelect(); // Refresh group options in case they changed
             $('#moveToGroupModal').modal('show');
         }
 
@@ -276,7 +325,7 @@ document.addEventListener('DOMContentLoaded', function () {
             } else {
                 console.log('Move successful, closing modal and reloading groups');
                 $('#moveToGroupModal').modal('hide');
-                loadGroups();
+                loadGroups(getActiveTabId());
             }
         })
         .catch(e => {
@@ -286,7 +335,7 @@ document.addEventListener('DOMContentLoaded', function () {
     });
 
     // Initial load
-    loadGroups();
+    loadGroups(getActiveTabId());
 });
 </script>
 {% endblock %}
