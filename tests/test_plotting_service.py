@@ -50,6 +50,7 @@ def test_create_bokeh_lightcurve_figure_skips_invalid_rows_and_returns_component
     assert "No lightcurve data" not in div
     assert "<script" in script
     assert "Bokeh" in script
+    assert '"flipped":true' in script
 
 
 @pytest.mark.slow
