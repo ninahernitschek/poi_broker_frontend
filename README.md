@@ -35,7 +35,7 @@ This repository contains the web frontend, including a small database for testin
 
 After downloading the package, install all required packages for development:
 
-`pip3 install -r requirements-dev.txt`
+`python -m pip install -r requirements.txt -r requirements-dev.txt`
 
 Use the regular `requirements.txt` for deployments.
 
@@ -96,11 +96,14 @@ Also, inspect the browser developer console (F12) to see if there are any errors
 
 ### Testing, Debugging and Profiling
 
-Tests have become fairly comprehensive across various modules. Always run all tests before committing changes.
+Use focused tests while developing; commit hooks run lightweight checks only.
+Pull requests and pushes to `main` run the full suite in CI. See
+[development checks](pre-commit.md) for installation, the optional smoke hook,
+CI triggers, and coverage requirements.
 
 Run `pytest` (Fast parallel execution recommended for development)
 ```
-python -m pytest -n auto -q --tb=no
+python -m pytest -n 2 -q --durations=15
 ```
 
 For more detailed testing and coverage requirements, please see `/tests/coverage.md`. Every module should aim for at least 50%-75% code coverage, with a total project goal of 75%+ coverage.

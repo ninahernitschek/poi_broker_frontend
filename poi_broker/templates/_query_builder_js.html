@@ -308,18 +308,40 @@
       label: 'Probability Class',
       type: 'string',
       input: 'select',
+      {# Values from services.catalog_query.VALID_PROB_CLASSES (auditSBA F15) #}
       values: {
-        cvnova: 'cvnova',
-        e: 'e',
-        lpv: 'lpv',
-        puls: 'puls',
-        periodic_other: 'periodic_other',
-        quas: 'quas',
-        sn: 'sn',
-        yso: 'yso'
-      }
+        {% for prob_class_value in prob_classes %}
+        {{ prob_class_value }}: '{{ prob_class_value }}'{{ ',' if not loop.last }}
+        {% endfor %}
+      },
+      // Categorical values: equality + set membership only (mirrors ant_passband).
+      // LIKE on a multi-select would match the literal comma-joined string,
+      // which is never desired for these codes, so do not offer it here.
+      operators: ['equal', 'not_equal', 'in', 'not_in']
     }
   ];
+
+  // in/not_in carry arrays (operator.multiple=true) but the builder only
+  // produces an array when the filter opts in: text/number inputs need
+  // value_separator (splits "a,b" into ["a","b"]), select inputs need
+  // multiple:true (multi-select). Without these the value stays a scalar
+  // string and the backend rejects it with 400, making in/not_in dead.
+  // Apply the opt-ins to every filter that allows in/not_in. LIKE-family
+  // operators may then receive arrays for comma input; the backend rejoins
+  // them with ',' (_LIKE_JOIN_OPERATORS) so contains "a,b" still matches
+  // the literal "a,b" instead of 400ing.
+  filters.forEach((f) => {
+    const ops = f.operators; // undefined = all default operators (includes in/not_in)
+    const allowsIn = !ops || ops.includes('in') || ops.includes('not_in');
+    if (!allowsIn) {
+      return;
+    }
+    if (f.input === 'select') {
+      f.multiple = true;
+    } else if (f.value_separator === undefined) {
+      f.value_separator = ',';
+    }
+  });
 
   const builderChangeEvents = [
     'afterAddRule.queryBuilder', 'afterDeleteRule.queryBuilder',
@@ -355,6 +377,7 @@
     let previewSeq = 0;
     let previewXhr = null;
     let countXhr = null;
+    let savePending = false;
 
     function abortPreviewRequests() {
       if (previewXhr) previewXhr.abort();
@@ -375,6 +398,33 @@
 
     function onBuilderChange() {
       resetPreview();
+    }
+
+    // Select filters use multiple:true so the <select> collects every chosen
+    // option regardless of operator. Scalar operators (equal, less, ...) only
+    // accept one value, so catch multi+scalar here with guidance instead of
+    // letting the preview round-trip fail with a bare 400.
+    const SCALAR_SINGLE_VALUE_OPERATORS = [
+      'equal', 'not_equal', 'less', 'less_or_equal', 'greater', 'greater_or_equal'
+    ];
+
+    function findScalarMultiError(node) {
+      if (!node || !Array.isArray(node.rules)) {
+        return null;
+      }
+      for (const cond of node.rules) {
+        if (cond && typeof cond === 'object' && Array.isArray(cond.rules)) {
+          const nested = findScalarMultiError(cond);
+          if (nested) {
+            return nested;
+          }
+        } else if (cond && SCALAR_SINGLE_VALUE_OPERATORS.includes(cond.operator)) {
+          if (Array.isArray(cond.value) && cond.value.length > 1) {
+            return cond.operator;
+          }
+        }
+      }
+      return null;
     }
 
     function initBuilderPlugin() {
@@ -416,6 +466,7 @@
     initBuilderPlugin();
 
     $previewButton.on('click', function () {
+      if ($previewButton.prop('disabled')) return;
       try {
         const result = $builder.queryBuilder('getSQL', false, false);
         const rules = getRules();
@@ -424,6 +475,12 @@
 
         if (!rules || !Array.isArray(rules.rules) || rules.rules.length === 0) {
           resetPreview('Please add at least one valid rule.');
+          return;
+        }
+
+        const scalarMultiOp = findScalarMultiError(rules);
+        if (scalarMultiOp) {
+          resetPreview('Operator "' + scalarMultiOp + '" needs a single value — switch to "in" for multiple selections.');
           return;
         }
 
@@ -449,7 +506,7 @@
 
           $results.text('Query is valid. Filter: ' + response.sql);
           previewSuccess = true;
-          $saveButton.prop('disabled', false).attr('title', settings.saveTitle);
+          $saveButton.prop('disabled', savePending).attr('title', settings.saveTitle);
           if (typeof settings.onPreview === 'function') {
             settings.onPreview(response, rules);
           }
@@ -496,7 +553,7 @@
     });
 
     $saveButton.on('click', function () {
-      if (!previewSuccess) {
+      if (!previewSuccess || savePending || $saveButton.prop('disabled')) {
         return;
       }
 
@@ -514,10 +571,12 @@
           return;
         }
 
+        savePending = true;
         $saveButton.prop('disabled', true);
         $.ajax({
           url: '/api/watchlist',
           type: 'POST',
+          timeout: 15000,
           data: JSON.stringify({ name: name, rules: rules }),
           headers: {
             'Content-Type': 'application/json',
@@ -527,7 +586,6 @@
           dataType: 'json',
           success: function (response) {
             $results.text('Watchlist "' + response.name + '" saved (id=' + response.id + ').');
-            $saveButton.prop('disabled', false).attr('title', settings.saveTitle);
             if (typeof settings.onSave === 'function') {
               settings.onSave(response, { reset: resetState, root: root });
               return;
@@ -537,12 +595,16 @@
           error: function (xhr, status, error) {
             const resp = xhr.responseJSON;
             $results.text('Save error: ' + ((resp && resp.error) || error));
-            $saveButton.prop('disabled', false).attr('title', settings.saveTitle);
           }
+        }).always(function () {
+          savePending = false;
+          $saveButton.prop('disabled', !previewSuccess);
+          if (previewSuccess) $saveButton.attr('title', settings.saveTitle);
         });
       } catch (error) {
+        savePending = false;
         $results.text('Error: ' + error.message);
-        $saveButton.prop('disabled', false).attr('title', settings.saveTitle);
+        $saveButton.prop('disabled', !previewSuccess);
       }
     });
 

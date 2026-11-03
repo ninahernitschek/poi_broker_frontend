@@ -108,3 +108,6 @@ class TestInputParser:
     def test_parse_dates_rejects_invalid_month(self, parser):
         # Invalid month (13) is rejected rather than returned verbatim.
         assert parser.parse_dates('20251301').values == []
+        assert parser.parse_dates('2026-13-40').values == []
+        assert parser.parse_dates('2026-02-31').values == []
+        assert parser.parse_dates('2023-01-01T99:99:99').values == []

@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+  schedule:
+    - cron: '23 9 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Keep scheduled/manual checks independent of push and PR checks.
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  SECRET_KEY: ci-only-not-a-deployment-secret
+  FLASK_TESTING: '1'
+  FLASK_DEBUG: '0'
+  HUEY_BACKEND: memory
+  HUEY_IMMEDIATE: 'true'
+  MPLBACKEND: Agg
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: python -m pip install ruff==0.17.0 pre-commit==4.7.0 pre-commit-hooks==6.0.0
+      - run: python -m pre_commit run --all-files --show-diff-on-failure
+
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: python -m pip install -r requirements.txt -r requirements-dev.txt
+      # Two workers bound RAM use; do not spawn one scientific Python per CPU.
+      - run: python -m pytest -n 2 -q --durations=15 --cov=poi_broker --cov-report=term-missing --cov-report=xml --cov-fail-under=75
+      - run: node --test tests/test_pending_actions.cjs

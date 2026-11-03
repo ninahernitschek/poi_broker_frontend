@@ -78,6 +78,7 @@ def create_bokeh_lightcurve_figure(lightcurve_data):
     p = figure(height=350, sizing_mode="stretch_width")
     p.xaxis.axis_label = 'date_alert_mjd'
     p.yaxis.axis_label = 'ant_mag_corrected'
+    p.y_range.flipped = True  # Lower magnitudes are brighter and belong at the top.
     
     # Plot each passband separately
     for passband, color in PASSBAND_COLORS.items():

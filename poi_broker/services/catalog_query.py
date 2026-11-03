@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Any, Mapping
 from urllib.parse import urlencode
 
 from sqlalchemy.orm import Query
@@ -34,16 +34,158 @@ PAGINATION_KEYS = frozenset(
     {
         'page',
         'last',
-        'before_mjd',
+        'before_v',
         'before_alert_id',
         'before_locus_id',
-        'after_mjd',
+        'after_v',
         'after_alert_id',
         'after_locus_id',
+        # Explicit "cursor sits in the null segment" flag, and the ?nulls=1
+        # segment jump. Both are pagination state, never user filters, so they
+        # are stripped from generated filter links and bookmarks.
+        'before_null',
+        'after_null',
+        'nulls',
+        # Legacy date-only cursor params, still emitted by pre-2026-10
+        # bookmarks. Parsed for backward compatibility (see parse_keyset_cursor)
+        # and stripped from generated links/bookmarks like the rest.
+        'before_mjd',
+        'after_mjd',
     }
 )
+# Sortable columns exposed via sort__<key> URL params ('asc'/'desc').
+# Exactly one sort key is honoured per request (see resolve_sort);
+# filter_bookmarks derives its ALLOWED_KEYS from FILTER_KEYS | SORT_KEYS —
+# keep them in sync.
+SORT_KEYS = (
+    'date',
+    'alert_id',
+    'ztf_object_id',
+    'locus_id',
+    'locus_ra',
+    'locus_dec',
+    'ant_mag_corrected',
+)
+
+# Sort key -> model column. Every key in SORT_KEYS must appear here.
+SORT_COLUMNS = {
+    'date': Ztf.date_alert_mjd,
+    'alert_id': Ztf.alert_id,
+    'ztf_object_id': Ztf.ztf_object_id,
+    'locus_id': Ztf.locus_id,
+    'locus_ra': Ztf.locus_ra,
+    'locus_dec': Ztf.locus_dec,
+    'ant_mag_corrected': Ztf.ant_mag_corrected,
+}
+
+# Nullability is NOT hand-kept: SortSpec.nullable reads it off the model
+# column. The primary-key members are declared primary_key=True, so they come
+# back nullable=False and never need a second sort segment.
+
+DEFAULT_SORT_KEY = 'date'
+
+# Human-readable names for the "N alerts have no <X>" notice above the list.
+SORT_LABELS = {
+    'date': 'date',
+    'alert_id': 'alert ID',
+    'ztf_object_id': 'object ID',
+    'locus_id': 'locus ID',
+    'locus_ra': 'RA',
+    'locus_dec': 'Dec',
+    'ant_mag_corrected': 'magnitude',
+}
+
+# Base list projection, in display order. project_catalog_columns appends any
+# sortable column missing from here.
+_BASE_LIST_ATTRS = (
+    'date_alert_mjd',
+    'alert_id',
+    'ztf_object_id',
+    'ant_passband',
+    'locus_id',
+    'locus_ra',
+    'locus_dec',
+    'ant_mag_corrected',
+)
+
+# Sort key -> projected-row attribute name. Only 'date' differs from its key.
+SORT_COLUMN_ATTRS = {
+    'date': 'date_alert_mjd',
+    'alert_id': 'alert_id',
+    'ztf_object_id': 'ztf_object_id',
+    'locus_id': 'locus_id',
+    'locus_ra': 'locus_ra',
+    'locus_dec': 'locus_dec',
+    'ant_mag_corrected': 'ant_mag_corrected',
+}
 
 search_service = SearchService()
+
+
+@dataclass(frozen=True)
+class SortSpec:
+    """The single sort column in force for a request."""
+
+    key: str
+    column: Any
+    attr: str
+    desc: bool
+    nullable: bool
+    numeric: bool
+
+    def order_terms(self):
+        """ORDER BY terms making the sort column PRIMARY and the order total.
+
+        (column, alert_id, locus_id) is a total order because (alert_id,
+        locus_id) is unique across the table (verified: 0 duplicate pairs in
+        3,178,668 rows). Appending the tiebreakers as a partial sort of the
+        column's own index keeps the scan streaming; putting the sort column
+        first is what makes the ORDER BY match the index prefix instead of
+        sorting the whole table.
+        """
+        direction = self.column.desc() if self.desc else self.column.asc()
+        tiebreak = Ztf.alert_id.desc() if self.desc else Ztf.alert_id.asc()
+        locus = Ztf.locus_id.desc() if self.desc else Ztf.locus_id.asc()
+        return (direction, tiebreak, locus)
+
+
+def _column_nullable(column: Any) -> bool:
+    """Whether the model column admits NULL.
+
+    Read off the declarative model rather than a hand-kept frozenset, so adding
+    a key to SORT_KEYS cannot leave the pagination layer disagreeing with the
+    schema. Primary-key members are declared primary_key=True and therefore
+    report nullable=False.
+    """
+    return bool(column.property.columns[0].nullable)
+
+
+def resolve_sort(args: Mapping) -> SortSpec:
+    """Pick the one active sort. First key in SORT_KEYS order wins.
+
+    Multi-sort URLs are accepted but collapsed to a single key: a second and
+    third sort key can only break ties *within* equal values of the first, so
+    they never change the row order the user sees — they just made the ORDER BY
+    longer and the keyset cursor wider. 'asc' selects ascending; every other
+    value (including 'desc' and junk) is descending, so an unrecognised value
+    can never leave the OFFSET path without a total order.
+    """
+    chosen = DEFAULT_SORT_KEY
+    desc = True
+    for key in SORT_KEYS:
+        raw = args.get(f'sort__{key}')
+        if raw:
+            chosen = key
+            desc = raw.strip().lower() != 'asc'
+            break
+    return SortSpec(
+        key=chosen,
+        column=SORT_COLUMNS[chosen],
+        attr=SORT_COLUMN_ATTRS[chosen],
+        desc=desc,
+        nullable=_column_nullable(SORT_COLUMNS[chosen]),
+        numeric=SORT_COLUMNS[chosen].type.python_type is float,
+    )
 
 
 @dataclass(frozen=True)
@@ -53,8 +195,7 @@ class CatalogQueryBuild:
     filter_warning: str
     has_applied_filters: bool
     has_cheap_equality: bool
-    is_date_only_sort: bool
-    date_sort_desc: bool
+    sort: SortSpec
 
 
 def _base_query(*, include_classification: bool) -> Query:
@@ -178,83 +319,41 @@ def _apply_catalog_filters(query: Query, args: Mapping) -> tuple[Query, str, boo
     return query, filter_warning, has_applied_filters, has_cheap_equality, has_prob_class_filter
 
 
-def _apply_catalog_sorts(query: Query, args: Mapping) -> tuple[Query, bool, bool]:
-    """Apply sort keys. Returns query, is_date_only_sort, date_sort_desc."""
-    date_sort_desc = True
-    if args.get('sort__date'):
-        sort_date_order = args.get('sort__date')
-        if sort_date_order == 'desc':
-            query = query.order_by(Ztf.date_alert_mjd.desc())
-            date_sort_desc = True
-        if sort_date_order == 'asc':
-            query = query.order_by(Ztf.date_alert_mjd.asc())
-            date_sort_desc = False
-    else:
-        query = query.order_by(Ztf.date_alert_mjd.desc())
+def _apply_catalog_sort(query: Query, sort: SortSpec) -> Query:
+    """Order by the sort column FIRST, with PK tiebreakers for a total order.
 
-    is_date_only_sort = True
-    sort_alert_order = args.get('sort__alert_id')
-    if sort_alert_order:
-        is_date_only_sort = False
-        if sort_alert_order == 'desc':
-            query = query.order_by(Ztf.alert_id.desc())
-        if sort_alert_order == 'asc':
-            query = query.order_by(Ztf.alert_id.asc())
+    The previous implementation chained `.order_by()` calls, and SQLAlchemy
+    *appends* those, so `date_alert_mjd DESC` stayed the leading term for
+    every secondary sort. Clicking "RA ascending" therefore ordered RA only
+    within a single MJD: page 1 of `?sort__locus_ra=asc` began at ra=250.66
+    and the lowest reachable RA (277.97 at the old row-100,000 boundary) was
+    nowhere near the catalog minimum of 0.000253. The column headers were
+    close to decorative.
 
-    sort_object_order = args.get('sort__ztf_object_id')
-    if sort_object_order:
-        is_date_only_sort = False
-        if sort_object_order == 'desc':
-            query = query.order_by(Ztf.ztf_object_id.desc())
-        if sort_object_order == 'asc':
-            query = query.order_by(Ztf.ztf_object_id.asc())
-
-    sort_locus_order = args.get('sort__locus_id')
-    if sort_locus_order:
-        is_date_only_sort = False
-        if sort_locus_order == 'desc':
-            query = query.order_by(Ztf.locus_id.desc())
-        if sort_locus_order == 'asc':
-            query = query.order_by(Ztf.locus_id.asc())
-
-    sort_ra_order = args.get('sort__locus_ra')
-    if sort_ra_order:
-        is_date_only_sort = False
-        if sort_ra_order == 'desc':
-            query = query.order_by(Ztf.locus_ra.desc())
-        if sort_ra_order == 'asc':
-            query = query.order_by(Ztf.locus_ra.asc())
-
-    sort_dec_order = args.get('sort__locus_dec')
-    if sort_dec_order:
-        is_date_only_sort = False
-        if sort_dec_order == 'desc':
-            query = query.order_by(Ztf.locus_dec.desc())
-        if sort_dec_order == 'asc':
-            query = query.order_by(Ztf.locus_dec.asc())
-
-    sort_mag_order = args.get('sort__ant_mag_corrected')
-    if sort_mag_order:
-        is_date_only_sort = False
-        if sort_mag_order == 'desc':
-            query = query.order_by(Ztf.ant_mag_corrected.desc())
-        if sort_mag_order == 'asc':
-            query = query.order_by(Ztf.ant_mag_corrected.asc())
-
-    return query, is_date_only_sort, date_sort_desc
+    No NULL predicate belongs here. Rows whose sort value is NULL are listed,
+    in a second segment after this one (see services.catalog_list), so the
+    count query needs no matching restriction either and "Rows: N" is the true
+    total. Note the ORDER BY must stay a bare index prefix: adding a leading
+    `col IS NULL` term is what previously forced a full sort (3.82 s/page).
+    """
+    return query.order_by(*sort.order_terms())
 
 
 def project_catalog_columns(query: Query) -> Query:
-    """Project list columns including classification label."""
+    """Project list columns including classification label.
+
+    Every sortable column must be projected: `cursor_from_row` reads the sort
+    column off the returned row to build the next page's cursor, so a sortable
+    column missing here would raise AttributeError at pagination time rather
+    than at import or query-build time. Adding a key to SORT_KEYS therefore
+    appends its column to the projection automatically.
+    """
+    attrs = list(_BASE_LIST_ATTRS)
+    for attr in dict.fromkeys(SORT_COLUMN_ATTRS.values()):
+        if attr not in attrs:
+            attrs.append(attr)
     return query.with_entities(
-        Ztf.date_alert_mjd,
-        Ztf.alert_id,
-        Ztf.ztf_object_id,
-        Ztf.ant_passband,
-        Ztf.locus_id,
-        Ztf.locus_ra,
-        Ztf.locus_dec,
-        Ztf.ant_mag_corrected,
+        *(getattr(Ztf, attr) for attr in attrs),
         Classification.prob_class.label('prob_class'),
     )
 
@@ -270,10 +369,14 @@ def build_catalog_query(args: Mapping, *, include_sort: bool = True) -> CatalogQ
         args,
     )
 
-    date_sort_desc = True
-    is_date_only_sort = True
+    sort = resolve_sort(args)
     if include_sort:
-        list_query, is_date_only_sort, date_sort_desc = _apply_catalog_sorts(list_query, args)
+        list_query = _apply_catalog_sort(list_query, sort)
+    # count_query is deliberately left free of any sort restriction. It once
+    # carried the same orderability predicate as list_query so "Rows: N" would
+    # not overstate a listing that hid 31.8% of the catalog. NULL-valued rows
+    # are now listed in a trailing segment, so list and count agree at the full
+    # 3,178,668 without either query being restricted.
 
     return CatalogQueryBuild(
         list_query=list_query,
@@ -281,8 +384,7 @@ def build_catalog_query(args: Mapping, *, include_sort: bool = True) -> CatalogQ
         filter_warning=warning,
         has_applied_filters=has_filters,
         has_cheap_equality=cheap_equality,
-        is_date_only_sort=is_date_only_sort,
-        date_sort_desc=date_sort_desc,
+        sort=sort,
     )
 
 

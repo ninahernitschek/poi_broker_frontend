@@ -53,7 +53,7 @@ def _normalize_last_selected_observatory(raw):
 
     if source == 'custom':
         observatory_id = raw.get('id')
-        if isinstance(observatory_id, int):
+        if isinstance(observatory_id, int) and not isinstance(observatory_id, bool):
             return {'source': 'custom', 'id': observatory_id}
         return None
 

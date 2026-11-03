@@ -51,7 +51,13 @@ def get_huey_sqlite_path():
     # First check if explicitly provided
     explicit_path = os.environ.get('HUEY_SQLITE_PATH')
     if explicit_path:
-        return str(Path(explicit_path).expanduser().resolve())
+        path = Path(explicit_path).expanduser()
+        if not path.is_absolute():
+            raise ValueError(
+                'HUEY_SQLITE_PATH must be an absolute path shared by the '
+                'web app and worker.'
+            )
+        return str(path.resolve())
 
     # No explicit path: try the Flask app's instance folder first.
     try:
@@ -75,9 +81,14 @@ def get_huey_sqlite_path():
 def create_huey():
     """
     Create and configure Huey instance based on environment.
-    
+
     Returns:
         Huey: Configured Huey instance (MemoryHuey or SqliteHuey)
+
+    Raises:
+        RuntimeError: If HUEY_BACKEND=sqlite and HUEY_SQLITE_PATH is unset
+            outside a Flask app context. Set it explicitly (same absolute
+            path for web app and worker).
     """
     backend_type = get_huey_backend()
     
@@ -90,6 +101,30 @@ def create_huey():
             journal_mode='wal',
             timeout=5,
             cache_mb=8,
+            # fsync=False is passed EXPLICITLY, and must stay explicit: it is
+            # also huey's own default, and huey 3.x applies
+            # `pragma synchronous=(2 if fsync else 0)` unconditionally, so
+            # omitting this kwarg silently leaves the queue at
+            # PRAGMA synchronous=OFF. Do not "clean up" this argument.
+            #
+            # Consequence, stated plainly: huey.db runs WITHOUT power-loss
+            # corruption guarantees. A power loss or hard reset can lose
+            # already-committed enqueues and can corrupt the WAL; the
+            # documented recovery for a corrupt queue is deleting it.
+            #
+            # Why that is tolerable here: the queue is a work queue, not the
+            # system of record. The durable intent for every export is the
+            # ExportTask row in users.db, which stays PENDING if its enqueue is
+            # lost, and the consumer's stale-task guard fails it after
+            # EXPORT_STALE_MAX_AGE_SECONDS so the user can retry. Losing a
+            # queue commit costs a replay, not data.
+            #
+            # Switching to fsync=True (PRAGMA synchronous=FULL) is a real
+            # behavior change and is deliberately NOT done here: it needs
+            # measured commit latency on the production queue plus the deployed
+            # systemd unit config, neither of which is verifiable from the
+            # source tree. See the "Queue durability" revisit trigger in
+            # docs/async_export/adr_huey_sqlite.md.
             fsync=False,
             utc=True
         )

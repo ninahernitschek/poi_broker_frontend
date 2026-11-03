@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from functools import lru_cache
 from typing import Any
 
 from sqlalchemy.dialects import sqlite as _sqlite_dialect
@@ -10,7 +11,7 @@ from sqlalchemy.orm import Query
 
 from .. import db
 from ..models import Classification, Ztf
-from ..querybuilder_translator import Filter
+from ..querybuilder_translator import Filter, TableNotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -33,10 +34,20 @@ EXPORT_SELECT_COLS = [getattr(Ztf, name) for name in ZTF_COLUMNS] + [
 
 EXPORT_YIELD_PER = 1000
 
+# Shared with Filter so table names and join detection cannot drift apart.
+QUERY_MODELS = {'featuretable': Ztf, 'classification': Classification}
+CLASSIFICATION_TABLE = next(
+    name for name, model in QUERY_MODELS.items() if model is Classification
+)
 
+
+@lru_cache(maxsize=1)
 def get_export_columns() -> list[str]:
     """
     Return the column names used when writing an export CSV row.
+
+    The result is cached and shared across callers (build_export_row runs once
+    per exported row, up to MAX_EXPORT_ROWS), so it must not be mutated.
 
     Returns:
         list[str]: Ztf object columns followed by classification columns.
@@ -61,22 +72,33 @@ def build_export_row(row: Row) -> dict[str, Any]:
 def _rules_need_classification(rules_payload: dict) -> bool:
     """Return True if any rule field targets the classification table."""
     for cond in rules_payload.get('rules', []):
+        if not isinstance(cond, dict):
+            raise ValueError('Invalid querybuilder rules payload')
         if 'condition' in cond:
             if _rules_need_classification(cond):
                 return True
             continue
         field_name = cond.get('field', '')
-        if isinstance(field_name, str) and field_name.startswith('classification.'):
+        if isinstance(field_name, str) and field_name.startswith(f'{CLASSIFICATION_TABLE}.'):
             return True
     return False
 
 
-def _validate_rules_payload(rules_payload: dict) -> None:
+def _validate_rules_payload(rules_payload: dict, *, require_rules: bool = True) -> None:
     if not isinstance(rules_payload, dict) or 'rules' not in rules_payload:
         raise ValueError('Invalid querybuilder rules payload')
 
-    if not isinstance(rules_payload.get('rules'), list) or len(rules_payload['rules']) == 0:
+    rules = rules_payload.get('rules')
+    if not isinstance(rules, list):
+        raise ValueError('Invalid querybuilder rules payload')
+    if require_rules and len(rules) == 0:
         raise ValueError('At least one filter rule is required')
+
+    for cond in rules:
+        if not isinstance(cond, dict):
+            raise ValueError('Invalid querybuilder rules payload')
+        if 'condition' in cond:
+            _validate_rules_payload(cond, require_rules=False)
 
 
 def build_query_from_rules(
@@ -121,9 +143,13 @@ def build_query_from_rules(
     else:
         base_query = db.session.query(Ztf)
 
-    models_dict = {'featuretable': Ztf, 'classification': Classification}
-    myfilter = Filter(models_dict, base_query)
-    filtered_query = myfilter.querybuilder(rules_payload)
+    myfilter = Filter(QUERY_MODELS, base_query)
+    try:
+        filtered_query = myfilter.querybuilder(rules_payload)
+    except TableNotFoundError as exc:
+        raise ValueError(f'Unknown table: {exc}') from exc
+    except NotImplementedError as exc:
+        raise ValueError(str(exc)) from exc
 
     if filtered_query.whereclause is None:
         raise ValueError('No filter conditions could be built from the rules')

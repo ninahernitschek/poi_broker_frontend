@@ -9,6 +9,15 @@ Create/drop DB tables around each test app lifecycle
 """
 
 
+@pytest.fixture(scope='session', autouse=True)
+def _offline_earth_rotation_data():
+    """Use Astropy's bundled IERS table; tests must not wait on network data."""
+    from astropy.utils import iers
+
+    with iers.conf.set_temp('auto_download', False):
+        yield
+
+
 @pytest.fixture(autouse=True)
 def _reset_worker_app():
     """Clear the Huey process-wide Flask app between tests (tmp_path DBs)."""
@@ -17,6 +26,16 @@ def _reset_worker_app():
     tasks_mod._worker_app = None
     yield
     tasks_mod._worker_app = None
+
+
+@pytest.fixture(autouse=True)
+def _reset_timezone_finder_cache():
+    """Drop the shared TimezoneFinder singleton so tests never see a stale one."""
+    from poi_broker.observing_tool import _get_timezone_finder
+
+    _get_timezone_finder.cache_clear()
+    yield
+    _get_timezone_finder.cache_clear()
 
 
 @pytest.fixture()

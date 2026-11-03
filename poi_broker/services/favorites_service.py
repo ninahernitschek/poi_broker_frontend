@@ -202,7 +202,7 @@ def create_favorite_group(name):
     if not current_user.is_authenticated:
         return {'error': 'authentication required'}, 401
     
-    if not name or not name.strip():
+    if not isinstance(name, str) or not name.strip():
         return {'error': 'name cannot be empty'}, 400
     
     try:

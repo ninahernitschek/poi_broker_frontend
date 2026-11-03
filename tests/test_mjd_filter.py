@@ -356,6 +356,17 @@ class TestMjdRoute:
         assert b'<div class="alert alert-warning" role="alert">' in response.data
         assert b'Date filter cannot be applied' in response.data
 
+    def test_iso_date_with_invalid_month_shows_warning(self, app):
+        client = app.test_client()
+        response = client.get("/?date=2026-13-40")
+        assert response.status_code == 200
+        assert b'<div class="alert alert-warning" role="alert">' in response.data
+        assert b'Date filter cannot be applied' in response.data
+
+        count = client.get("/api/catalog-count?date=2026-13-40")
+        assert count.status_code == 200
+        assert "count" in count.get_json()
+
     def test_empty_date_no_warning(self, app):
         client = app.test_client()
         response = client.get("/?date=")

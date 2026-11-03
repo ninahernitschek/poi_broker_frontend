@@ -52,7 +52,16 @@
   {{ filter_warning }}
 </div>
 {% endif %}
-<form method="GET" action="/" id="filter_form">
+{% if nulls_href %}
+<div class="alert alert-info py-1" role="status">
+  <i class="fa fa-info-circle" aria-hidden="true"></i>
+  {% if sort_null_count is not none %}{{ sort_null_count | format_number }} alerts have no {{ sort_label }} and are
+  listed after the others{% else %}Alerts without {{ sort_label }} are listed after the others{% endif %}{% if nulls_href %} &mdash;
+  <a href="{{ nulls_href }}">jump to them</a>.
+  {% else %}.{% endif %}
+</div>
+{% endif %}
+<form method="GET" action="/" id="filter_form" data-single-submit>
   <div class="row">
     
     <div class="col-md-12">
@@ -63,11 +72,13 @@
             {% if total_queries is not none %}
             <span id="catalog-rows-value">{{ total_queries }}</span>
             {% else %}
-            <span id="catalog-rows-value">{{ page_size }}+</span>
+            <span id="catalog-rows-value">{{ count_lower_bound }}+</span>
+            {% if count_available %}
             <button type="button" class="btn btn-link btn-sm p-0 align-baseline" id="btn-catalog-count"
                     data-count-url="/api/catalog-count{% if filter_query_string %}?{{ filter_query_string }}{% endif %}"
                     data-query-string="{{ query_string }}"
-                    data-page-size="{{ page_size }}">Count</button>
+                    data-page-size="{{ page_size }}" data-max-page="{{ max_page }}">Count</button>
+            {% endif %}
             {% endif %}
           </div>
         </div> 
@@ -192,24 +203,13 @@
                 <!-- <label for="prob_class">prob_class</label> -->
                 <select id="prob_class" name="prob_class" class="form-control form-control-sm"
                   style="select.form-control {padding: 2px;}">
-                  <option value="" {% if not request.args.prob_class in ['cvnova', 'e', 'lpv', 'puls', 'periodic_other', 'quas', 'sn', 'yso'] %} selected {% endif %}>
+                  {# Options rendered from services.catalog_query.VALID_PROB_CLASSES (auditSBA F15) #}
+                  <option value="" {% if request.args.prob_class not in prob_classes %} selected {% endif %}>
                   </option>
-                  <option value="cvnova" {% if request.args.prob_class=='cvnova' %} selected {% endif %}>cvnova
+                  {% for prob_class_value in prob_classes %}
+                  <option value="{{ prob_class_value }}" {% if request.args.prob_class == prob_class_value %} selected {% endif %}>{{ prob_class_value }}
                   </option>
-                  <option value="e" {% if request.args.prob_class=='e' %} selected {% endif %}>e
-                  </option>
-                  <option value="lpv" {% if request.args.prob_class=='lpv' %} selected {% endif %}>lpv
-                  </option>
-                  <option value="puls" {% if request.args.prob_class=='puls' %} selected {% endif %}>puls
-                  </option>
-                  <option value="periodic_other" {% if request.args.prob_class=='periodic_other' %} selected {% endif %}>periodic_other
-                  </option>
-                  <option value="quas" {% if request.args.prob_class=='quas' %} selected {% endif %}>quas
-                  </option>
-                  <option value="sn" {% if request.args.prob_class=='sn' %} selected {% endif %}>sn
-                  </option>
-                  <option value="yso" {% if request.args.prob_class=='yso' %} selected {% endif %}>yso
-                  </option>
+                  {% endfor %}
                 </select>
               </th>
               <th></th>
@@ -231,14 +231,14 @@
                   data-object-id="{{ alert.ztf_object_id }}" 
                   data-candid="{{ alert.alert_id }}"
                   data-locusid="{{ alert.locus_id }}"
-                  data-locusra="{{ alert.locus_ra }}"
-                  data-locusdec="{{ alert.locus_dec }}">{{ alert.ztf_object_id }}</a>
+                  data-locusra="{{ alert.locus_ra if alert.locus_ra is not none else '' }}"
+                  data-locusdec="{{ alert.locus_dec if alert.locus_dec is not none else '' }}">{{ alert.ztf_object_id }}</a>
               </td>
               <td>{{ alert.date_alert_mjd }}</td>
               <td>{{ alert.ant_passband | astro_filter }}</td>
               <td>{{ alert.locus_id  }}</td>
-              <td>{{ '%.5f'|format(alert.locus_ra) }}</td>
-              <td>{{ '%.5f'|format(alert.locus_dec) }}</td>
+              <td>{{ '%.5f'|format(alert.locus_ra) if alert.locus_ra is not none else '' }}</td>
+              <td>{{ '%.5f'|format(alert.locus_dec) if alert.locus_dec is not none else '' }}</td>
               <td>{{ alert.ant_mag_corrected | mag_filter }}</td>
               <td>{{ alert.prob_class or '' }}</td>
               <td>
@@ -529,6 +529,8 @@
       return;
     }
 
+    const release = window.PoiPendingActions.begin(this);
+    if (!release) return;
     const pressed = btn.attr('aria-pressed') === 'true';
     const sessionId = modalSessionId;
     btn.attr('aria-pressed', String(!pressed)).toggleClass('active', !pressed);
@@ -555,6 +557,7 @@
       })
       .always(function () {
         if (btn.data('favXhr') === xhr) btn.removeData('favXhr');
+        release();
       });
     btn.data('favXhr', xhr);
     trackModalRequest(xhr);
@@ -562,6 +565,7 @@
 
   {% if current_user.is_authenticated %}
   $('#btn_save_filter_bookmark').on('click', function () {
+    if (this.disabled) return;
     const name = window.prompt('Name this filter bookmark:', '');
     if (name === null) {
       return;
@@ -573,7 +577,13 @@
     }
 
     const searchParams = new URLSearchParams(window.location.search);
-    searchParams.delete('page');
+    // Strip pagination state (canonical keys injected from
+    // catalog_query.PAGINATION_KEYS) plus page-chrome params: a bookmark must
+    // restore as a pure filter+sort URL, and cursor params would 400 on the
+    // server (ALLOWED_KEYS).
+    {{ pagination_keys | tojson }}.forEach(function (key) {
+      searchParams.delete(key);
+    });
     searchParams.delete('survey');
     searchParams.delete('options');
     const params = {};
@@ -581,9 +591,12 @@
       params[key] = value;
     });
 
+    const release = window.PoiPendingActions.begin(this);
+    if (!release) return;
     $.ajax({
       type: 'POST',
       url: '/api/filter-bookmarks',
+      timeout: 15000,
       contentType: 'application/json',
       headers: {
         'X-CSRFToken': csrfToken
@@ -606,7 +619,7 @@
         } catch (e) { /* ignore */ }
         alert(msg);
       }
-    });
+    }).always(release);
   });
   {% endif %}
 
@@ -1730,12 +1743,14 @@
             //first, clear all sort__ URL params and pagination cursors
             var keysToDelete = [];
             searchParams.forEach(function(value, key) {
-              if (key.startsWith("sort__") || key === "page" || key === "last"
-                  || key.startsWith("before_") || key.startsWith("after_")) {
+              if (key.startsWith("sort__")) {
                 keysToDelete.push(key);
               }
             });
             keysToDelete.forEach(function(key) { searchParams.delete(key); });
+            {{ pagination_keys | tojson }}.forEach(function(key) {
+              searchParams.delete(key);
+            });
 
           if (desc || (!asc && !desc)) {
             $this.addClass('asc');
@@ -1780,12 +1795,19 @@
                 var pageSize = Number($btn.attr('data-page-size')) || 100;
                 var lastPage = Math.max(1, Math.ceil(count / pageSize));
                 var queryString = $btn.attr('data-query-string') || '';
-                lastBtn.href = queryString ? ('/?' + queryString + '&page=' + lastPage) : ('/?page=' + lastPage);
-                lastBtn.classList.remove('d-none', 'disabled');
+                if (lastPage <= Number($btn.attr('data-max-page'))) {
+                  lastBtn.href = queryString ? ('/?' + queryString + '&page=' + lastPage) : ('/?page=' + lastPage);
+                  lastBtn.classList.remove('d-none', 'disabled');
+                }
               }
               $btn.remove();
             })
             .catch(function (error) {
+              if (error && error.status === 422) {
+                showAlertToast('Exact counting took too long. Narrow the filters and try again.', 'catalog-count-toast');
+                $btn.remove();
+                return;
+              }
               if (error && error.status === 429) {
                 showAlertToast('Too many requests. Please wait a few seconds and try again.', 'rate-limit-toast');
               }

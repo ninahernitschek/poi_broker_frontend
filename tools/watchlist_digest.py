@@ -27,7 +27,7 @@ Implemented behavior:
 
 Operational options included:
 ```
---dry-run to test without sending email
+--dry-run to test without sending any email, including administrator error notifications
 --only-email to target a single user by email address
 --limit to change per-watchlist cap (default 1000)
 --log-level for diagnostics (default WARNING)
@@ -72,6 +72,7 @@ import sys
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from html import escape
 from pathlib import Path
 from typing import cast
 from urllib.parse import quote
@@ -201,14 +202,14 @@ def build_email_content(base_url: str, user_name: str | None, day_label: str, re
         "<div style=\"max-width:760px; margin:0 auto; padding:16px;\">",
         "<h2 style=\"margin:0 0 8px; color:#0f172a;\">POI Broker</h2>",
         "<p style=\"margin:0 0 16px; color:#334155;\">Daily Watchlist Digest</p>",
-        f"<p>Hi {greeting},</p>",
-        f"<p>Here are your results for <strong>{day_label}</strong> (UTC). Total matches: <strong>{total_matches}</strong>.</p>",
+        f"<p>Hi {escape(greeting)},</p>",
+        f"<p>Here are your results for <strong>{escape(day_label)}</strong> (UTC). Total matches: <strong>{total_matches}</strong>.</p>",
     ]
 
     for item in results:
         plain_lines.append(f"Watchlist: {item.watchlist_name}")
         html_parts.append("<div style=\"border:1px solid #e2e8f0; border-radius:8px; padding:12px; margin:12px 0;\">")
-        html_parts.append(f"<h4 style=\"margin:0 0 8px;\">Watchlist: {item.watchlist_name}</h4>")
+        html_parts.append(f"<h4 style=\"margin:0 0 8px;\">Watchlist: {escape(item.watchlist_name)}</h4>")
 
         if item.error:
             plain_lines.append("  Error: An internal error occurred while processing this watchlist; the administrator has been notified.")
@@ -231,7 +232,7 @@ def build_email_content(base_url: str, user_name: str | None, day_label: str, re
         for alert_id in item.alert_ids:
             link = build_alert_link(base_url, alert_id)
             plain_lines.append(f"  - {alert_id}: {link}")
-            html_parts.append(f"<li style=\"margin:2px 0;\"><a href=\"{link}\" style=\"color:#1d4ed8; text-decoration:none;\">{alert_id}</a></li>")
+            html_parts.append(f"<li style=\"margin:2px 0;\"><a href=\"{escape(link, quote=True)}\" style=\"color:#1d4ed8; text-decoration:none;\">{escape(alert_id)}</a></li>")
 
         html_parts.append("</ul>")
         html_parts.append("</div>")
@@ -274,19 +275,19 @@ def send_admin_error_notification(admin_email: str | None, user_email: str, user
         "<html><body style=\"font-family:Segoe UI, Arial, sans-serif; color:#111827;\">",
         "<div style=\"max-width:760px; margin:0 auto; padding:16px;\">",
         f"<h2 style=\"margin:0 0 8px; color:#0f172a;\">POI Broker Watchlist Digest Error</h2>",
-        f"<p style=\"margin:0 0 8px;\">Watchlist id <strong>{row['watchlist_id']}</strong> for <strong>{user_label}</strong> failed during digest processing for {day_label} UTC.</p>",
+        f"<p style=\"margin:0 0 8px;\">Watchlist id <strong>{escape(str(row['watchlist_id']))}</strong> for <strong>{escape(user_label)}</strong> failed during digest processing for {escape(day_label)} UTC.</p>",
         "<table style=\"width:100%; border-collapse:collapse; margin-top:12px;\">",
         "<tbody>",
-        f"<tr><td style=\"padding:6px; border:1px solid #e2e8f0; font-weight:700;\">User email</td><td style=\"padding:6px; border:1px solid #e2e8f0;\">{user_email}</td></tr>",
-        f"<tr><td style=\"padding:6px; border:1px solid #e2e8f0; font-weight:700;\">User name</td><td style=\"padding:6px; border:1px solid #e2e8f0;\">{user_name or '&lt;none&gt;'}</td></tr>",
-        f"<tr><td style=\"padding:6px; border:1px solid #e2e8f0; font-weight:700;\">Watchlist name</td><td style=\"padding:6px; border:1px solid #e2e8f0;\">{row['watchlist_name']}</td></tr>",
-        f"<tr><td style=\"padding:6px; border:1px solid #e2e8f0; font-weight:700;\">Date</td><td style=\"padding:6px; border:1px solid #e2e8f0;\">{day_label} UTC</td></tr>",
+        f"<tr><td style=\"padding:6px; border:1px solid #e2e8f0; font-weight:700;\">User email</td><td style=\"padding:6px; border:1px solid #e2e8f0;\">{escape(user_email)}</td></tr>",
+        f"<tr><td style=\"padding:6px; border:1px solid #e2e8f0; font-weight:700;\">User name</td><td style=\"padding:6px; border:1px solid #e2e8f0;\">{escape(user_name or '<none>')}</td></tr>",
+        f"<tr><td style=\"padding:6px; border:1px solid #e2e8f0; font-weight:700;\">Watchlist name</td><td style=\"padding:6px; border:1px solid #e2e8f0;\">{escape(str(row['watchlist_name']))}</td></tr>",
+        f"<tr><td style=\"padding:6px; border:1px solid #e2e8f0; font-weight:700;\">Date</td><td style=\"padding:6px; border:1px solid #e2e8f0;\">{escape(day_label)} UTC</td></tr>",
         "</tbody>",
         "</table>",
         "<h3 style=\"margin:16px 0 8px;\">SQL filter</h3>",
-        f"<pre style=\"white-space:pre-wrap; background:#f8fafc; padding:12px; border:1px solid #e2e8f0;\">{row['sql_where']}</pre>",
+        f"<pre style=\"white-space:pre-wrap; background:#f8fafc; padding:12px; border:1px solid #e2e8f0;\">{escape(str(row['sql_where']))}</pre>",
         "<h3 style=\"margin:16px 0 8px;\">Error details</h3>",
-        f"<pre style=\"white-space:pre-wrap; background:#f8fafc; padding:12px; border:1px solid #e2e8f0;\">{error}</pre>",
+        f"<pre style=\"white-space:pre-wrap; background:#f8fafc; padding:12px; border:1px solid #e2e8f0;\">{escape(error)}</pre>",
         "</div></body></html>",
     ]
 
@@ -349,14 +350,15 @@ def run(limit: int, dry_run: bool, only_email: str | None, skip_empty: bool) -> 
             except Exception as exc:
                 logger.exception("Failed watchlist id=%s", row["watchlist_id"])
                 db.session.rollback()
-                send_admin_error_notification(
-                    admin_email=admin_email,
-                    user_email=str(row["user_email"]),
-                    user_name=row["user_name"],
-                    row=row,
-                    error=str(exc),
-                    day_label=day_label,
-                )
+                if not dry_run:
+                    send_admin_error_notification(
+                        admin_email=admin_email,
+                        user_email=str(row["user_email"]),
+                        user_name=row["user_name"],
+                        row=row,
+                        error=str(exc),
+                        day_label=day_label,
+                    )
                 per_user[user_key].append(
                     WatchlistResult(
                         watchlist_id=int(row["watchlist_id"]),

@@ -1,0 +1,36 @@
+minimum_pre_commit_version: '4.0.0'
+default_stages: [pre-commit]
+
+# Use the activated development environment; dependencies are pinned in
+# requirements-dev.txt. No second copy of the scientific stack is installed.
+repos:
+  - repo: local
+    hooks:
+      - id: ruff
+        name: Ruff correctness checks
+        entry: python -m ruff check
+        language: system
+        types: [python]
+      - id: check-yaml
+        name: Validate YAML
+        entry: python -m pre_commit_hooks.check_yaml
+        language: system
+        types: [yaml]
+      - id: check-toml
+        name: Validate TOML
+        entry: python -m pre_commit_hooks.check_toml
+        language: system
+        types: [toml]
+      - id: check-merge-conflict
+        name: Check merge conflict markers
+        entry: python -m pre_commit_hooks.check_merge_conflict
+        args: [--assume-in-merge]
+        language: system
+        types: [text]
+      - id: smoke-tests
+        name: Route smoke tests (manual)
+        entry: python -m pytest -q tests/test_smoke_routes.py
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [manual]

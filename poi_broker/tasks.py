@@ -7,6 +7,7 @@ import logging
 import os
 import threading
 import time
+from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -77,7 +78,7 @@ def _is_sqlite_lock_error(exc: BaseException) -> bool:
     return False
 
 
-def _transition_export_task(task_id: int, from_statuses: list[str], **values) -> bool:
+def _transition_export_task(task_id: int, from_statuses: Sequence[str], **values) -> bool:
     """
     Compare-and-swap update for ExportTask.
 
@@ -137,9 +138,10 @@ def create_export_file(query_params: dict, user_id: int, task_id: int):
         user_id: User ID for the export task
         task_id: Integer ID of the ExportTask record
     
-    Updates:
-        ExportTask status from PENDING to RUNNING then to SUCCESS/FAILED
-        Sets file_path on SUCCESS or error_message on FAILED
+        Updates:
+            ExportTask status from PENDING to RUNNING then to SUCCESS/FAILED
+            Sets file_path as soon as the output file is created (so killed
+            workers leave a reclaimable row); error_message on FAILED
 
     Status writes use compare-and-swap so a stale-guard FAILED cannot be
     overwritten back to RUNNING/SUCCESS by a still-running worker. A periodic
@@ -161,7 +163,7 @@ def create_export_file(query_params: dict, user_id: int, task_id: int):
             # Claim the row: PENDING|RUNNING -> RUNNING. Skip if already terminal
             # (e.g. stale guard FAILED the task before this worker started).
             if not _transition_export_task(
-                task_id, ['PENDING', 'RUNNING'], status='RUNNING'
+                task_id, ExportTask.ACTIVE_STATUSES, status='RUNNING'
             ):
                 logger.info(
                     f'ExportTask {task_id} not claimed (already terminal); aborting'
@@ -184,11 +186,37 @@ def create_export_file(query_params: dict, user_id: int, task_id: int):
             exports_dir = Path(app.instance_path) / 'exports'
             exports_dir.mkdir(parents=True, exist_ok=True)
             
-            # Generate filename with timestamp
+            # Task identity prevents sequential same-second exports colliding.
             timestamp = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
-            filename = f'export_{user_id}_{timestamp}.csv'
+            filename = f'export_{user_id}_{task_id}_{timestamp}.csv'
             file_path = exports_dir / filename
-            
+
+            # Persist the path before writing: a worker killed mid-write then
+            # leaves a FAILED row (via the stale guard) that still names the
+            # partial CSV, so cleanup_expired_exports can reclaim the file.
+            # A NULL path would orphan it forever. CAS miss = stale guard
+            # already FAILED the task. A lock error is tolerated like the
+            # heartbeat below: the SUCCESS transition re-records file_path,
+            # and the stale window remains the backstop.
+            try:
+                if not _transition_export_task(
+                    task_id, ['RUNNING'], status='RUNNING', file_path=str(file_path)
+                ):
+                    logger.info(
+                        f'ExportTask {task_id} aborted before write '
+                        '(status no longer RUNNING)'
+                    )
+                    _unlink_export_file(file_path)
+                    return
+            except Exception as persist_exc:
+                if not _is_sqlite_lock_error(persist_exc):
+                    raise
+                logger.warning(
+                    'ExportTask %s file_path persist skipped (DB locked); '
+                    'continuing write',
+                    task_id,
+                )
+
             # Write CSV file
             all_columns = get_export_columns()
 
@@ -251,14 +279,15 @@ def create_export_file(query_params: dict, user_id: int, task_id: int):
             
         except Exception:
             logger.exception(f'ExportTask {task_id} failed with an error.')
-            # Remove any partially-written CSV so failed exports don't leave
-            # orphan files behind (cleanup_expired_exports only cleans SUCCESS).
+            # Remove any partially-written CSV now; the FAILED row keeps
+            # file_path and cleanup_expired_exports deletes the row once it
+            # passes the retention age.
             _unlink_export_file(file_path)
             # PENDING|RUNNING -> FAILED only; do not clobber a terminal row.
             try:
                 _transition_export_task(
                     task_id,
-                    ['PENDING', 'RUNNING'],
+                    ExportTask.ACTIVE_STATUSES,
                     status='FAILED',
                     error_message='Export failed. Please try again.',
                 )
@@ -300,7 +329,7 @@ def reset_stale_export_tasks(
     """
     from .models import ExportTask
 
-    filters = [ExportTask.status.in_(['PENDING', 'RUNNING'])]
+    filters = [ExportTask.status.in_(ExportTask.ACTIVE_STATUSES)]
     if user_id is not None:
         filters.append(ExportTask.user_id == user_id)
     if not ignore_age:
@@ -339,6 +368,10 @@ def cleanup_expired_exports(max_age_days: int = EXPORT_RETENTION_DAYS) -> int:
     leave a DB row pointing at a missing file (the download route already guards
     against missing files, but this keeps the DB consistent).
 
+    Covers both SUCCESS exports and FAILED rows: the latter may carry a
+    file_path persisted before a worker died mid-write, whose partial CSV
+    would otherwise never be reclaimed.
+
     Returns:
         int: number of exports removed.
     """
@@ -347,7 +380,7 @@ def cleanup_expired_exports(max_age_days: int = EXPORT_RETENTION_DAYS) -> int:
 
     expired = ExportTask.query.filter(
         ExportTask.created_at < cutoff,
-        ExportTask.status == 'SUCCESS',
+        ExportTask.status.in_(('SUCCESS', 'FAILED')),
     ).all()
 
     removed = 0

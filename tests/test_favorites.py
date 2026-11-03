@@ -253,6 +253,54 @@ def test_favorites_validation(auth_client):
     assert r.status_code == 200
 
 
+def test_favorites_strips_locus_id_before_validation_and_lookup(auth_client):
+    r = auth_client.get("/api/favorite", query_string={"locusId": "   "})
+    assert r.status_code == 400
+    assert "Missing locusId" in r.get_json()["error"]
+
+    r = auth_client.post("/api/favorite", json={"locusId": "   ", "fav": True})
+    assert r.status_code == 400
+    assert "Missing locusId" in r.get_json()["error"]
+
+    r = auth_client.post(
+        "/api/favorite",
+        json={"locusId": "  " + "x" * 129 + "  ", "fav": True},
+    )
+    assert r.status_code == 400
+    assert "too long" in r.get_json()["error"]
+
+    r = auth_client.post(
+        "/api/favorite",
+        json={"locusId": "  trimmed-locus  ", "fav": True},
+    )
+    assert r.status_code == 200
+
+    r = auth_client.get(
+        "/api/favorite",
+        query_string={"locusId": "  trimmed-locus  "},
+    )
+    assert r.status_code == 200
+    assert r.get_json()["fav"] is True
+
+    r = auth_client.get("/api/favorites")
+    favs = r.get_json()["favorites"]
+    assert len(favs) == 1
+    assert favs[0]["locusId"] == "trimmed-locus"
+
+    r = auth_client.post(
+        "/api/favorite",
+        json={"locusId": " trimmed-locus ", "fav": False},
+    )
+    assert r.status_code == 200
+
+    r = auth_client.get(
+        "/api/favorite",
+        query_string={"locusId": "  trimmed-locus  "},
+    )
+    assert r.status_code == 200
+    assert r.get_json()["fav"] is False
+
+
 def test_favorites_cross_user_isolation(app, auth_client):
     """Test that users cannot access other users' favorites."""
     from poi_broker import db
@@ -530,3 +578,25 @@ def test_delete_favorite_group_generic_exception(app, auth_client, monkeypatch):
     r = auth_client.delete(f"/api/favorite-groups/{group_id}")
     assert r.status_code == 500
     assert "Error deleting favorite group" in r.get_json()["error"]
+
+
+def test_favorite_group_rejects_non_string_name(auth_client):
+    r = auth_client.post("/api/favorite-groups", json={"name": 12345})
+    assert r.status_code == 400
+    assert r.is_json
+
+
+def test_favorite_rejects_non_string_locus_id(auth_client):
+    r = auth_client.post("/api/favorite", json={"locusId": ["nested"], "fav": True})
+    assert r.status_code == 400
+    assert r.is_json
+
+
+def test_favorite_rejects_boolean_group_id(auth_client):
+    r = auth_client.post(
+        "/api/favorite",
+        json={"locusId": "locus-bool", "fav": True, "groupId": True},
+    )
+    assert r.status_code == 400
+    assert r.is_json
+    assert "groupId" in r.get_json()["error"]

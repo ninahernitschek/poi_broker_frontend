@@ -11,7 +11,7 @@
 
                 <p class="text-center">Click the button below to verify your email address.</p>
 
-                <form method="POST" action="{{ url_for('auth.verify_email_post', token=token) }}">
+                <form data-single-submit method="POST" action="{{ url_for('auth.verify_email_post', token=token) }}">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <button type="submit" class="btn btn-info btn-lg btn-block">
                         Verify Email

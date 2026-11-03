@@ -6,12 +6,13 @@ from .models import User
 from . import db
 import secrets
 from datetime import datetime, timedelta, timezone
-import os
 import logging
 from email_validator import validate_email, EmailNotValidError
 from . import limiter
-from .services.email_service import send_email, _format_expire_time
+from .services.email_service import send_email
 import hashlib
+from dataclasses import dataclass
+from itsdangerous import BadData, TimestampSigner, URLSafeTimedSerializer
 
 
 def hash_token(token: str) -> str:
@@ -47,11 +48,131 @@ FORGOT_PASSWORD_GENERIC_NOTICE = (
 )
 VERIFICATION_TOKEN_TTL_SECONDS = int(timedelta(hours=24).total_seconds())
 RESET_TOKEN_TTL_SECONDS = int(timedelta(hours=1).total_seconds())
+RESET_TOKEN_PREFIX = 'v1.'
+RESET_TOKEN_SALT = 'poi-broker-password-reset-v1'
+
+
+class _ResetTokenSigner(TimestampSigner):
+    def get_timestamp(self) -> int:
+        return _utc_now_epoch()
+
+
+def _reset_serializer() -> URLSafeTimedSerializer:
+    return URLSafeTimedSerializer(
+        current_app.config['SECRET_KEY'],
+        salt=RESET_TOKEN_SALT,
+        signer=_ResetTokenSigner,
+        signer_kwargs={'digest_method': hashlib.sha256},
+    )
+
+
+def _create_reset_token(user: User) -> str:
+    """Issue a link without changing account state or invalidating older links."""
+    payload = {
+        'uid': user.id,
+        'revision': user.password_changed_at or 0,
+        'nonce': secrets.token_urlsafe(32),
+    }
+    return RESET_TOKEN_PREFIX + _reset_serializer().dumps(payload)
+
+
+@dataclass(frozen=True)
+class _ResetGrant:
+    user_id: int
+    password_hash: str
+    revision: int | None
+    expires_at: int
+    legacy_hash: str | None = None
+
+
+def _validate_reset_token(token: str) -> _ResetGrant | None:
+    """Validate signed links, or unexpired pre-deployment stored token hashes."""
+    legacy_hash = None
+    if token.startswith(RESET_TOKEN_PREFIX):
+        try:
+            payload, signed_at = _reset_serializer().loads(
+                token[len(RESET_TOKEN_PREFIX):],
+                max_age=RESET_TOKEN_TTL_SECONDS,
+                return_timestamp=True,
+            )
+        except BadData:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        uid = payload.get('uid')
+        revision = payload.get('revision')
+        nonce = payload.get('nonce')
+        if (
+            type(uid) is not int or not 0 < uid <= 2**63 - 1
+            or type(revision) is not int or revision < 0
+            or not isinstance(nonce, str) or len(nonce) != 43
+        ):
+            return None
+        user = db.session.get(User, uid)
+        if user is None or (user.password_changed_at or 0) != revision:
+            return None
+        expires_at = int(signed_at.timestamp()) + RESET_TOKEN_TTL_SECONDS
+    else:
+        legacy_hash = hash_token(token)
+        user = User.query.filter_by(reset_token=legacy_hash).first()
+        if user is None or _is_reset_token_expired(user.reset_token_expires):
+            return None
+        expires_at = int(user.reset_token_expires)
+    return _ResetGrant(user.id, user.password, user.password_changed_at, expires_at, legacy_hash)
+
+
+def _write_password(
+    user_id: int,
+    expected_password: str,
+    expected_revision: int | None,
+    new_password: str,
+    *,
+    reset_expires_at: int | None = None,
+    legacy_hash: str | None = None,
+) -> bool:
+    """Only the still-current credential may win a password write across workers."""
+    new_hash = generate_password_hash(new_password)
+    now = _utc_now_epoch()
+    # Recheck expiry after the expensive hash, before attempting the write.
+    if reset_expires_at is not None and reset_expires_at < now:
+        return False
+    query = User.query.filter(
+        User.id == user_id,
+        User.password == expected_password,
+        User.password_changed_at == expected_revision,
+    )
+    if legacy_hash is not None:
+        query = query.filter(
+            User.reset_token == legacy_hash,
+            User.reset_token_expires >= now,
+        )
+    matched = query.update({
+        'password': new_hash,
+        'password_changed_at': max(now, (expected_revision or 0) + 1),
+        'reset_token': None,
+        'reset_token_expires': None,
+    }, synchronize_session=False)
+    if matched != 1:
+        db.session.rollback()
+        return False
+    db.session.commit()
+    return True
 
 # Checked against unknown emails so login burns one password-hash comparison
 # either way; otherwise timing reveals whether the account exists (CWE-208).
 # Generated with the same defaults as real password hashes.
 DUMMY_PASSWORD_HASH = generate_password_hash(secrets.token_urlsafe(32))
+
+
+def _password_is_too_weak(password: str | None) -> bool:
+    """True when a password is missing, whitespace-only, or shorter than 8 chars.
+
+    Outer spaces are part of the secret (login compares the raw value), so
+    emptiness is judged on the trimmed copy while length uses the raw value.
+    """
+    if not isinstance(password, str):
+        return True
+    return not password.strip() or len(password) < 8
 
 
 def _absolute_url(endpoint: str, **values) -> str:
@@ -95,6 +216,7 @@ def login_post():
     # Exactly one password-hash comparison runs on every attempt — known
     # emails against the stored hash, unknown ones against DUMMY_PASSWORD_HASH
     # — so response timing does not reveal whether an account exists (CWE-208).
+    credential_revision = (user.password_changed_at or 0) if user else 0
     if user:
         valid_password = check_password_hash(user.password, password)
     else:
@@ -113,7 +235,8 @@ def login_post():
     login_user(user, remember=remember)
     # A login proves the current credential, so stamp past the watermark even
     # in the watermark second (docs/password_reset/adr_session_invalidation.md).
-    session['login_at'] = max(_utc_now_epoch(), (user.password_changed_at or 0) + 1)
+    session['login_at'] = max(_utc_now_epoch(), credential_revision + 1)
+    session['password_revision'] = credential_revision
     return redirect(url_for('main.profile'))
 
 @auth_blueprint.route('/signup')
@@ -153,7 +276,7 @@ def signup_post():
     # Validate password length. Leading/trailing spaces are part of the
     # password (login compares the raw value), so only the trimmed copy
     # feeds the emptiness check — otherwise 8 spaces would pass len().
-    if not password.strip() or len(password) < 8:
+    if _password_is_too_weak(password):
         flash('Password must be at least 8 characters.', 'danger')
         return redirect(url_for('auth.signup'))
     
@@ -297,36 +420,30 @@ def forgot_password_post():
     user = User.query.filter_by(email=email).first() if email else None
     
     if user:
-        # Generate reset token
-        raw_reset_token = secrets.token_urlsafe(32)
-        user.reset_token = hash_token(raw_reset_token)
-        user.reset_token_expires = _utc_now_epoch() + RESET_TOKEN_TTL_SECONDS
         try:
-            db.session.commit()
-        except Exception as e:
-            db.session.rollback()
-            logger.error(f'Database error during commit: {str(e)}', exc_info=True)
-        else:
+            raw_reset_token = _create_reset_token(user)
             result = send_email(
                 f"Reset your password using the following link: {_absolute_url('auth.reset_password', token=raw_reset_token)}",
                 email,
-                expire_time=user.reset_token_expires
+                expire_time=_utc_now_epoch() + RESET_TOKEN_TTL_SECONDS,
             )
             if not result:
                 logger.error('Failed to send password reset email')
+        except Exception:
+            logger.exception('Failed to issue password reset email')
 
     flash(FORGOT_PASSWORD_GENERIC_NOTICE, 'info')
     return redirect(url_for('auth.login'))
 
 @auth_blueprint.route('/reset-password/<token>')
 def reset_password(token):
-    user = User.query.filter_by(reset_token=hash_token(token)).first()
-    
-    if not user or _is_reset_token_expired(user.reset_token_expires):
+    if _validate_reset_token(token) is None:
         flash('Invalid or expired reset token', 'danger')
         return redirect(url_for('auth.login'))
     
-    return render_template('reset_password.html', token=token)
+    response = make_response(render_template('reset_password.html', token=token))
+    response.headers['Referrer-Policy'] = 'no-referrer'
+    return response
 
 @auth_blueprint.route('/reset-password/<token>', methods=['POST'])
 @limiter.limit(lambda: current_app.config.get('AUTH_RATE_LIMIT_RESET_PASSWORD', '10 per hour'))
@@ -342,29 +459,29 @@ def reset_password_post(token):
         flash('Passwords do not match', 'danger')
         return redirect(url_for('auth.reset_password', token=token))
 
-    if len(password) < 8:
+    if _password_is_too_weak(password):
         flash('Password must be at least 8 characters', 'danger')
         return redirect(url_for('auth.reset_password', token=token))
 
-    user = User.query.filter_by(reset_token=hash_token(token)).first()
-    if not user or _is_reset_token_expired(user.reset_token_expires):
+    grant = _validate_reset_token(token)
+    if grant is None:
         flash('Invalid or expired reset token', 'danger')
         return redirect(url_for('auth.login'))
 
-    # Hash and store new password, clear the token fields. Bumping
-    # password_changed_at ends every existing session and remembered login;
-    # the user logs back in with the new password below.
-    user.password = generate_password_hash(password)
-    user.password_changed_at = _utc_now_epoch()
-    user.reset_token = None
-    user.reset_token_expires = None
     try:
-        db.session.commit()
+        updated = _write_password(
+            grant.user_id, grant.password_hash, grant.revision, password,
+            reset_expires_at=grant.expires_at, legacy_hash=grant.legacy_hash,
+        )
     except Exception as e:
         db.session.rollback()
         logger.error(f'Database error during commit: {str(e)}', exc_info=True)
         flash('Failed to update password. Please try again later.', 'danger')
         return redirect(url_for('auth.reset_password', token=token))
+
+    if not updated:
+        flash('Invalid or expired reset token', 'danger')
+        return redirect(url_for('auth.login'))
 
     # The submitting browser may still hold a live session (e.g. the account
     # owner clicking their own reset link); drop it along with the rest.
@@ -410,7 +527,7 @@ def change_password():
         return redirect(url_for('auth.security'))
     
     # Validate password length
-    if len(new_password) < 8:
+    if _password_is_too_weak(new_password):
         flash('New password must be at least 8 characters.', 'danger')
         return redirect(url_for('auth.security'))
     
@@ -423,20 +540,21 @@ def change_password():
     # including this one — the user_loader demands login_at after
     # the change everywhere. logout_user() also clears the remember-me cookie
     # on this browser; tokens left on other devices become inert server-side.
-    changed_at = _utc_now_epoch()
-    current_user.password = generate_password_hash(new_password)
-    current_user.password_changed_at = changed_at
-    # A reset link requested before this change is a bearer credential that
-    # must not outlive the rotation, so clear it like reset_password_post does.
-    current_user.reset_token = None
-    current_user.reset_token_expires = None
     try:
-        db.session.commit()
+        updated = _write_password(
+            current_user.id, current_user.password,
+            current_user.password_changed_at, new_password,
+        )
     except Exception as e:
         db.session.rollback()
         logger.error(f'Database error during commit: {str(e)}', exc_info=True)
         flash('Failed to change password. Please try again later.', 'danger')
         return redirect(url_for('auth.security'))
+
+    if not updated:
+        logout_user()
+        flash('Your password changed during this request. Please log in again.', 'warning')
+        return redirect(url_for('auth.login'))
 
     logout_user()
     flash('Password changed. For your security you have been signed out on all '

@@ -94,7 +94,7 @@ CSS is already local Bootswatch **4.6.2**. JS was aligned to 4.6.2 bundle (was 4
 | REQ-004 | User can log out (secure session cookie cleared) | `tests/test_auth.py` |
 | REQ-005 | User can request password reset (1-hour expiry token) and set new password; the reset ends every existing session and remembered login for the account | `tests/test_auth.py`, `tests/test_security_regressions.py` |
 | REQ-006 | User can change password (requires current password); the change signs out all devices including the acting browser and clears its remember-me cookie | `tests/test_auth.py`, `tests/test_security_regressions.py` |
-| REQ-007 | User can browse/filter alerts on main page (date/MJD, alert_id, object_id, passband, locus_id, RA/Dec, magnitude, prob_class; multiple sort keys; 100 rows/page) | `tests/test_app.py`, `tests/test_alert_id_filter.py`, `tests/test_dec_filter.py`, `tests/test_ant_passband_filter.py` |
+| REQ-007 | User can browse/filter alerts on main page (date/MJD, alert_id, object_id, passband, locus_id, RA/Dec, magnitude, prob_class; one sort key; 100 rows/page; every row reachable) | `tests/test_app.py`, `tests/test_alert_id_filter.py`, `tests/test_dec_filter.py`, `tests/test_ant_passband_filter.py`, `tests/test_catalog_list.py`, `tools/verify_catalog_pagination.py` |
 | REQ-008 | User can download filtered alerts as CSV | `tests/test_app.py` |
 | REQ-009 | User can query crossmatches for a locus | `tests/test_app.py` |
 | REQ-010 | User can build visual queries (QueryBuilder) and preview SQL / get match count | `tests/test_visual_query*.py` |
@@ -135,7 +135,12 @@ The main page (`start()`) loads an authenticated user's `UserSettings` row **onc
 
 Catalog listing (`GET /`) does **not** run Flask-SQLAlchemy `paginate()` / a joined `COUNT(*)` on every request:
 
-- Date-only sort uses keyset pagination (`before_*` / `after_*` / `last=1`); extra `sort__*` keys or a bare `?page=N` jump use `LIMIT+1` + `OFFSET`.
+- Every sort is keyset-paginated (`before_*` / `after_*` / `last=1`) over the cursor `(sort_column, alert_id, locus_id)`. Only a bare `?page=N` jump (`N>1`) uses `LIMIT+1` + `OFFSET`; it exists for hand-typed and legacy bookmarked URLs, is capped by `MAX_PAGE`, and its 404 names the cursor-based alternative.
+- Exactly one `sort__*` key is honoured per request (first in `SORT_KEYS` order); the clicked column leads the `ORDER BY`, so the sort is real. The cursor is a total order because `(alert_id, locus_id)` is unique.
+- A **nullable** sort column is walked as two segments, dispatched in Python: rows carrying a value first, rows without last, each ordered by the requested direction. NULL therefore sorts last in *both* directions rather than SQLite's native NULLs-first ascending. A single-phase cursor cannot do this — `NULL > NULL` is false, so a cursor inside a NULL tie group matches nothing and the walk stops dead — and each segment is a separate point seek on the `(sort_column, alert_id, locus_id)` index, since `IS NULL` / `IS NOT NULL` are contiguous leading-column key ranges. No `typeof` filter is applied, so **Rows** is the true catalog total for every sort.
+  - `SortSpec.nullable` is read off the model column rather than a hand-kept key list. A cursor inside the null segment carries `<prefix>_null=1` instead of a value; a segment jump is `?nulls=1`. Both are stripped from generated filter links and bookmarks (`PAGINATION_KEYS`).
+  - The `?page=N` OFFSET path walks the same segments, splitting the global offset with per-segment counts from `cached_segment_counts()` (TTL-cached, one `COUNT(*)` per filter+sort key), so page N by number and page N by cursor agree. A page may straddle the boundary.
+  - A cursor whose value cannot be parsed raises `MalformedCursor` rather than being treated as absent, which would re-render page 1 and make Next an unbreakable loop.
 - Exact **Rows** on the list request when the result is short, the catalog is unfiltered (cached `COUNT(*)` on `featuretable` only), or a high-cardinality equality filter is applied (`alert_id` full id, `locus_id`, `ztf_object_id`).
 - Unselective filters show **Rows: 100+** and a Count control that calls `GET /api/catalog-count` with the same filters.
 
@@ -168,10 +173,16 @@ Two SQLite databases via SQLAlchemy binds: **alerts** (default bind) and **users
 
 ## 5. API Contracts (HTTP Endpoints Only)
 
+Global error handlers registered in `poi_broker/__init__.py`:
+- `413 Request Entity Too Large`: returns JSON `{"error": "Request body too large"}` (status 413) on `/api/*` or JSON requests; plain text for other requests. Bound by `MAX_CONTENT_LENGTH` (1 MiB).
+- `OverflowError`: client-supplied integers exceeding SQLite's 64-bit INTEGER range return JSON `{"error": "Numeric value out of range"}` (status 400) on `/api/*` or JSON requests; plain text 400 for HTML endpoints (e.g. `?page=N`).
+- `RecursionError`: overly nested payloads (e.g. query builder rules) return JSON `{"error": "Request payload is too deeply nested"}` (status 400) on `/api/*` or JSON requests; plain text 400 for other requests.
+- `CSRFError`: returns JSON `{"error": "csrf validation failed", "message": "..."}` (status 400) on `/api/*` or JSON requests; flash message and redirect for HTML form submissions.
+
 ### 5.1 Main Blueprint (`poi_broker/app.py`)
 | Method | Path | Auth | Request | Response | Errors |
 |---|---|---|---|---|---|
-| GET | `/` | Public | Query: `page`, `last`, `before_*`/`after_*` cursors, `date`, `date_alert_mjd`, `alert_id`, `ztf_object_id`, `ant_passband`, `locus_id`, `locus_ra`, `locus_dec`, `magpsf`, `prob_class`, `sort__*` | HTML `main.html` (100 rows/page; hybrid keyset/OFFSET) | 404 empty OFFSET page |
+| GET | `/` | Public | Query: `page`, `last`, `before_v`/`after_v` + `*_alert_id`/`*_locus_id` cursors, `date`, `date_alert_mjd`, `alert_id`, `ztf_object_id`, `ant_passband`, `locus_id`, `locus_ra`, `locus_dec`, `magpsf`, `prob_class`, `sort__*` | HTML `main.html` (100 rows/page; keyset, `?page=N` legacy OFFSET) | 404 empty `?page=N`, 404 empty `?nulls=1`, 404 `page > MAX_PAGE` (message names cursor alternative), 404 `page < 1`, 400 integer out of range |
 | GET | `/help` | Public | — | HTML `help.html` | — |
 | GET | `/contact` | Public | — | HTML `contact.html` | — |
 | GET | `/profile` | Login | — | HTML `profile.html` | — |
@@ -224,9 +235,9 @@ Flash messages are rendered once in `site.html` via `get_flashed_messages(with_c
 | Method | Path | Request | Response | Errors |
 |---|---|---|---|---|
 | GET | `/visual_query` | — | HTML `visual_query.html` | — |
-| POST | `/api/preview-query` | JSON rules | `{"sql":"..."}` | 400 invalid rules |
-| POST | `/api/export-query` | JSON rules | `{"count": int}` | — |
-| POST | `/api/watchlist` | JSON: `{"name","rules"}` | `{"status":"ok","id","name"}` 201 | 409 dup, 406 invalid |
+| POST | `/api/preview-query` | JSON rules | `{"sql":"..."}` | 400 invalid rules / missing JSON / oversized in-list / nested, 413 body too large, 500 error |
+| POST | `/api/export-query` | JSON rules | `{"count": int}` | 400 invalid rules / missing JSON / oversized in-list / nested, 413 body too large, 500 error |
+| POST | `/api/watchlist` | JSON: `{"name","rules"}` | `{"status":"ok","id","name"}` 201 | 400 invalid name or rules / missing JSON / oversized in-list / nested, 409 dup name, 413 body too large, 500 error |
 | GET | `/api/watchlist` | — | `{"watchlists":[{"id","name","sql_where","created_at"}]}` | — |
 | DELETE | `/api/watchlist/<int:wid>` | — | `{"status":"ok"}` | 404 |
 
@@ -270,7 +281,7 @@ Flash messages are rendered once in `site.html` via `get_flashed_messages(with_c
 | Method | Path | Request | Response | Errors |
 |---|---|---|---|---|
 | GET | `/export` | — | HTML `export.html` (query builder + recent task) | — |
-| POST | `/export` | JSON rules (query-builder shape) | `{"success":true,"task_id"}` 202 | 400 invalid/too large; 409 if a **non-stale** active task exists; stale active row (past `EXPORT_STALE_MAX_AGE_SECONDS`) is failed for this user then enqueue proceeds. A `snapshot_mjd` cutoff is computed at submit and applied to the pre-count and the export (rows with `date_alert_mjd >= snapshot_mjd` excluded) |
+| POST | `/export` | JSON rules (query-builder shape) | `{"success":true,"task_id"}` 202 | 400 invalid / exceeds `MAX_EXPORT_ROWS` / oversized in-list / nested, 409 if a **non-stale** active task exists, 413 body too large, 500 error; stale active row (past `EXPORT_STALE_MAX_AGE_SECONDS`) is failed for this user then enqueue proceeds. A `snapshot_mjd` cutoff is computed at submit and applied to the pre-count and the export (rows with `date_alert_mjd >= snapshot_mjd` excluded) |
 | GET | `/export/status/<int:task_id>` | — | JSON status (no `file_path`; includes `snapshot_mjd` and `data_as_of`) | 403/404 |
 | GET | `/export/download/<int:task_id>` | — | CSV attachment | redirect + flash if not SUCCESS / missing file |
 
@@ -281,10 +292,10 @@ Flash messages are rendered once in `site.html` via `get_flashed_messages(with_c
 ### 6.1 Authentication Lifecycle
 Signup → email verification (SHA-256 token, 24h expiry) → login (Flask-Login) → authenticated browsing. Password reset via emailed token (1h expiry). Change password requires current password. Role-based access via `role_required`.
 
-Any password write (reset or change) bumps `user.password_changed_at`; the `user_loader` then rejects any session whose `login_at` marker is not newer than the watermark or absent — which ends every session and remembered login for the account (remember-cookie restores carry no `login_at`). The acting browser is logged out too and its remember-me cookie expired. Accounts with `password_changed_at IS NULL` behave exactly as before, so deployment logs nobody out. Schema for this feature is applied manually (`tools/apply_password_changed_at.sql`, before restart; runbook `docs/password_reset/deployment.md`) — the application never alters the DB (ADR: `docs/password_reset/adr_session_invalidation.md`).
+Any password write (reset or change) bumps `user.password_changed_at`; the `user_loader` then rejects any session whose `login_at` marker is not newer than the watermark or absent — which ends every session and remembered login for the account (remember-cookie restores carry no `login_at`). The acting browser is logged out too and its remember-me cookie expired. Accounts with `password_changed_at IS NULL` behave exactly as before, so deployment logs nobody out. Schema for this feature was applied manually with a one-shot script (`tools/apply_password_changed_at.sql`, before restart; runbook `docs/password_reset/deployment.md` — the script was removed after production was migrated, see `docs/adr/adr_db_schema_migration_strategy.md`) — the application never alters the DB (ADR: `docs/password_reset/adr_session_invalidation.md`).
 
 ### 6.2 Browse & Filter Alerts
-`GET /` builds a `Ztf` query with optional filters (date/MJD, alert_id prefix/full, object_id, passband, locus_id, RA/Dec ranges, magnitude, prob_class) and multiple sort keys. Uses `catalog_query` + `SearchService` + `FilterService`. Hybrid pagination 100/page (keyset for date-only sort; OFFSET+1 otherwise). Exact row counts when cheap; otherwise `GET /api/catalog-count` on demand.
+`GET /` builds a `Ztf` query with optional filters (date/MJD, alert_id prefix/full, object_id, passband, locus_id, RA/Dec ranges, magnitude, prob_class) and one sort key. Uses `catalog_query` + `SearchService` + `FilterService`. Keyset pagination 100/page for every sort (`?page=N>1` falls back to capped OFFSET+1 for legacy URLs). Exact row counts when cheap; otherwise `GET /api/catalog-count` on demand.
 
 ### 6.3 Visual Query → Watchlist
 `GET /visual_query` → QueryBuilder UI → `POST /api/preview-query` (SQL preview) → `POST /api/export-query` (match count) → `POST /api/watchlist` (persist `rules_json`; store compiled SQL in `sql_where` as a display preview only). Uses `query_service` + `querybuilder_translator.py`.
@@ -365,10 +376,10 @@ CRUD custom observatories (auto timezone via `TimezoneFinder`); last selection p
 | # | Gap | Detail | Source |
 |---|---|---|---|
 | G1 | No formal external spec | All requirements inferred from code; no authoritative external document | — |
-| G2 | No CI workflow | No GitHub Actions / pre-commit config; validation is manual | repo root |
-| G3 | No Flask-Migrate | Schema migrations are manual SQL scripts only (`tools/*.sql`); the app never writes DDL — pinned by `test_boot_does_not_alter_legacy_users_db` | `tools/`, `docs/password_reset/deployment.md` |
+| G2 | Resolved: CI and commit checks | GitHub Actions runs full tests/coverage; commit hooks run lightweight checks only | `.github/workflows/ci.yml`, `pre-commit.md` |
+| G3 | Accepted: one-shot migrations | Manual SQL scripts are the chosen strategy, not missing implementation; original upstream main defines completion; the app never writes DDL | `docs/adr/adr_db_schema_migration_strategy.md`, `docs/adr/adr_migration_completion_status.md` |
 | G4 | `requirements2.txt` not guaranteed installable | Reference freeze only; may not install on all systems | `requirements2.txt` |
-| G5 | Coverage targets not enforced by CI | `tests/coverage.md` states targets but no gate | `tests/coverage.md` |
+| G5 | Per-module coverage not gated | CI enforces 75% total; individual-module targets remain advisory | `tests/coverage.md` |
 | G6 | Internal service contracts undocumented | `QueryService`, `FavoritesService`, etc. excluded (per scope decision) | `services/` |
 | G7 | Dual Popper (BS4 v1 bundle + TD6 v2) | Required while staying on Bootstrap 4 + Tempus Dominus 6. Do not unify without a major upgrade (§1.5) | `common_js.html`, `main_ui_js.html` |
 
@@ -410,10 +421,10 @@ CRUD custom observatories (auto timezone via `TimezoneFinder`); last selection p
 
 ---
 
-## 13. Top 5 Spec Gaps
+## 13. Documentation and validation considerations
 
 1. **No authoritative external spec** — requirements are code-inferred; this document is the first formal reference.
-2. **No CI enforcement** — no GitHub Actions; tests/coverage are not gated automatically.
-3. **No schema migration tooling** — Flask-Migrate absent; schema changes are manual SQL.
-4. **Coverage targets not enforced** — `tests/coverage.md` goals have no automated gate.
+2. **Per-module coverage enforcement** — CI gates total coverage; module targets remain advisory.
+3. **Schema migration policy is settled** — one-shot SQL scripts are intentional; use the migration ledger for remaining upstream integration work.
+4. **Validation baselines** — correctness lint is enforced; broader typing/security lint baselines are deferred.
 5. **Internal service contracts undocumented** — service-layer APIs excluded from this spec (scope decision); may need a follow-up doc.

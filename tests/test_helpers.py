@@ -31,6 +31,12 @@ def test_serialize_fallback_handles_nested_collections():
     assert serialized['nested'][1]['inner'] == 'baz'
 
 
+def test_safe_serialize_replaces_invalid_utf8_bytes():
+    result = safe_serialize({'data': b'\xff\xfe'})
+    parsed = json.loads(result)
+    assert parsed['data'] == '\ufffd\ufffd'
+
+
 def test_safe_serialize_handles_datetimes():
     payload = {
         'dt': datetime(2026, 8, 29, 12, 0, 0, tzinfo=timezone.utc),

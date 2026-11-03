@@ -1,11 +1,9 @@
-# Development dependencies
-# Compile with: pip-compile requirements-dev.in -o requirements-dev.txt
-# Or: uv pip compile requirements-dev.in -o requirements-dev.txt
-
-# Include base dependencies with constraints -r requirements.txt -c requirements.txt
-
-# Development dependencies
+# Install alongside requirements.txt. Keep validation-tool pins in sync with
+# pyproject.toml and .github/workflows/ci.yml.
 pytest
 pytest-cov
 pytest-mock
 pytest-xdist
+ruff==0.17.0
+pre-commit==4.7.0
+pre-commit-hooks==6.0.0

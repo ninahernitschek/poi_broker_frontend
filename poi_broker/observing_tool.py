@@ -7,6 +7,8 @@ import matplotlib.pyplot as plt
 from matplotlib import dates
 import io
 import base64
+import math
+from functools import lru_cache
 
 import numpy as np
 from astropy.visualization import astropy_mpl_style, quantity_support
@@ -26,6 +28,17 @@ from . import limiter
 from .models import UserObservatory
 
 logger = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=1)
+def _get_timezone_finder() -> TimezoneFinder:
+    """Shared TimezoneFinder instance.
+
+    Construction loads all boundary polygon data (~0.5s), so it must not run
+    per request. The instance is read-only after init (timezonefinder 8.x) and
+    safe to share across threads.
+    """
+    return TimezoneFinder()
 
 observing_tool_blueprint = Blueprint('observing_tool', __name__) 
 
@@ -84,7 +97,8 @@ def _resolve_zoneinfo(timezone_name):
 def calc_observing_plot():
     try:
         # Parse query parameters
-        obs_loc = request.args.get('obs_loc') #E.g. #EarthLocation.of_site('Rubin Observatory') TODO: we could also allow users to specify lat/lon instead of site name, but that would require more complex parsing and error handling. For now, let's just stick with site names.
+        # Built-in site name or an authenticated user's saved custom:<id>.
+        obs_loc = request.args.get('obs_loc')
         obs_date = request.args.get('obs_date')
         obs_tz = request.args.get('obs_tz')
         ra_value = request.args.get('ra')
@@ -94,11 +108,25 @@ def calc_observing_plot():
             return jsonify({'error': 'Missing required query parameters: obs_loc, obs_date, ra, dec'}), 400
 
         try:
-            year, month, day = obs_date.split('-')
+            parsed_date = datetime.strptime(obs_date, '%Y-%m-%d')
+            year = f'{parsed_date.year:04d}'
+            month = f'{parsed_date.month:02d}'
+            day = f'{parsed_date.day:02d}'
             ra = float(ra_value)
             dec = float(dec_value)
         except (ValueError, TypeError):
             return jsonify({'error': 'Invalid parameter format. Expected obs_date=YYYY-MM-DD and numeric ra/dec.'}), 400
+
+        # astropy neither bounds RA (it silently wraps) nor rejects NaN; dec
+        # out of range raises a ValueError much later inside SkyCoord and 500s
+        # the request. Validate here, at the same gate as the format check.
+        if (
+            not math.isfinite(ra)
+            or not math.isfinite(dec)
+            or not (0.0 <= ra < 360.0)
+            or not (-90.0 <= dec <= 90.0)
+        ):
+            return jsonify({'error': 'Invalid parameter value. RA must be within [0, 360) and Dec within [-90, 90] degrees.'}), 400
 
         if obs_loc.startswith('custom:'):
             if not current_user.is_authenticated:
@@ -124,7 +152,7 @@ def calc_observing_plot():
             tz = _resolve_zoneinfo(custom_row.timezone_name)
             if tz is None:
                 # Fallback by coordinates so malformed legacy values do not break observing plots.
-                fallback_timezone_name = TimezoneFinder().timezone_at(lng=obs_lon, lat=obs_lat)
+                fallback_timezone_name = _get_timezone_finder().timezone_at(lng=obs_lon, lat=obs_lat)
                 tz = _resolve_zoneinfo(fallback_timezone_name)
                 if tz is None:
                     logger.warning('Invalid timezone for custom observatory id=%s', custom_row.id)
@@ -145,8 +173,7 @@ def calc_observing_plot():
                 return jsonify({'error': 'Unknown observatory location.'}), 400
 
             obs_lon, obs_lat = observatory.lon.value, observatory.lat.value
-            tf = TimezoneFinder()
-            timezone_name = tf.timezone_at(lng=obs_lon, lat=obs_lat)
+            timezone_name = _get_timezone_finder().timezone_at(lng=obs_lon, lat=obs_lat)
             if timezone_name is None:
                 return jsonify({'error': 'Failed to determine timezone for selected observatory.'}), 400
             tz = _resolve_zoneinfo(timezone_name)
@@ -256,6 +283,8 @@ def calc_observing_plot():
 
         # 2: Create moon panel. Moon-down is a plain label (moonMessage), not HTML.
         night_moon_alt = moon_alt[np.where(sun_alt < 0)]
+        if night_moon_alt.size == 0:
+            return jsonify({'image': obs_img, 'moonMessage': 'No nighttime hours on this date'})
         if np.max(night_moon_alt) < 0:
             return jsonify({'image': obs_img, 'moonMessage': 'Moon down'})
 

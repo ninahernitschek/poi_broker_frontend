@@ -5,6 +5,7 @@ description = "A web application for the POI Broker."
 readme = "README.md"
 dependencies = [
     "Flask==3.*",
+    "itsdangerous==2.*",
     "flask-login==0.6.*",
     "Flask-WTF==1.*",
     "Flask-SQLAlchemy==3.*",
@@ -26,7 +27,19 @@ dev = [
     "pytest-cov",
     "pytest-mock",
     "pytest-xdist",
+    "ruff==0.17.0",
+    "pre-commit==4.7.0",
+    "pre-commit-hooks==6.0.0",
 ]
+
+[tool.ruff]
+target-version = "py312"
+extend-exclude = [".venv"]
+
+[tool.ruff.lint]
+# Start with syntax, undefined names, invalid control flow and bad comparisons.
+# Styling and unused-import enforcement need a separate legacy-code cleanup.
+select = ["E9", "F63", "F7", "F82"]
 
 [tool.coverage.run]
 source = ["poi_broker"]

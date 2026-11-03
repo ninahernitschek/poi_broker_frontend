@@ -58,6 +58,24 @@ web process.
 - **SQLite limits:** one consumer (default 2 threads). WAL is enabled in
   `poi_broker/huey_config.py`. App and worker must share the **same absolute**
   `HUEY_SQLITE_PATH` or they silently use two empty queues.
+- **Queue durability:** the queue file runs at
+  **`PRAGMA synchronous=OFF`**, because `poi_broker/huey_config.py` passes
+  `fsync=False` to `SqliteHuey` explicitly. This is deliberate and matches
+  upstream, but it means `huey.db` has **no power-loss corruption guarantee**:
+  a power loss or hard reset can lose already-committed enqueues and can
+  corrupt the WAL. The documented recovery for a corrupt queue is deleting it
+  (`rm "$HUEY_SQLITE_PATH"`) and letting the next enqueue recreate it.
+  Losing a queue commit is benign here, because the queue is a work queue and
+  not the system of record: the durable intent for every export is the
+  `ExportTask` row in `users.db`, which stays `PENDING` if its enqueue is lost,
+  and the consumer's stale-task guard fails it after
+  `EXPORT_STALE_MAX_AGE_SECONDS` so the user retries. A lost commit costs a
+  replay, not data.
+  `fsync=False` **must stay an explicit argument** even though it is also
+  huey's own default: huey 3.x applies
+  `pragma synchronous=(2 if fsync else 0)` unconditionally, so deleting the
+  argument leaves the queue at `OFF` silently rather than reverting to
+  SQLite's default. See the revisit trigger below before changing it.
 - **Dev vs prod:** default `HUEY_BACKEND=memory` runs tasks in-process (no
   worker). In that mode `POST /export` blocks until the CSV is written; keep
   local queries small or lower `EXPORT_MAX_ROWS`. There is no consumer, so
@@ -100,6 +118,55 @@ These are easy to get wrong; the consumer will look "fine" while doing nothing.
    enabled (do not pass `--no-periodic`).
 6. Automated tests: `tests/test_huey_tasks.py` (memory backend via `conftest.py`).
    Manual two-process check: `docs/async_export/local_app_and_worker.md`.
+7. Do not delete the `fsync=False` argument from `SqliteHuey(...)` as a
+   "cleanup", and do not describe `huey.db` as ACID / `synchronous=FULL`
+   anywhere. The queue runs at `synchronous=OFF`; see "Queue durability" above.
+   `tests/test_huey_config.py` pins both the code state and the docs.
+
+## Revisit trigger: queue durability (`fsync`)
+
+**Current decision:** keep `fsync=False` (`PRAGMA synchronous=OFF`).
+
+**Proposed change:** pass `fsync=True` to `SqliteHuey` in
+`poi_broker/huey_config.py`, which yields `PRAGMA synchronous=FULL` — ACID in
+WAL mode, so a power loss can no longer corrupt `huey.db`.
+
+**Why it is not done in the source tree:** this is a real write-path behavior
+change, and the evidence needed to make it safely is not available from the
+repository — it requires the deployed systemd unit configuration and measured
+commit latency on the production queue. Committing it on the strength of a
+micro-benchmark would be an unverified change to a deployed path.
+
+**Measure before deciding (on the production host):**
+
+1. Confirm the actual runtime state of both units, not the config:
+   ```bash
+   sqlite3 "$HUEY_SQLITE_PATH" "PRAGMA journal_mode;"   # persisted in the header
+   ```
+   `journal_mode` is stored in the database header, but `synchronous` is
+   **per-connection** and is not stored anywhere. Read it from a live huey
+   connection (`huey.storage._create_connection().execute('pragma
+   synchronous')`) or from a `huey_consumer` log line; a fresh `sqlite3`
+   connection will misleadingly report SQLite's compile-time default.
+2. Measure enqueue commit latency with and without `fsync=True` under the real
+   `POST /export` rate. The argument for FULL is that the write rate is
+   human-scale (one enqueue per rate-limited `POST /export`) so commit-time
+   fsync should cost milliseconds per real queue event and nothing on idle
+   consumer polls. That argument needs confirming against actual traffic.
+3. If FULL is adopted, update "Queue durability" above, invariant 7,
+   `docs/async_export/ubuntu_add_worker.md`, and `changelog.md` in the same
+   change — and relax the assertions in `tests/test_huey_config.py` that
+   currently pin the queue at `synchronous=OFF`.
+
+Note the deliberate asymmetry with the alerts database, which runs at
+`synchronous=NORMAL` (`PRAGMA synchronous = NORMAL` in
+`_configure_sqlite_pragmas`, `poi_broker/__init__.py`; pinned as NFR-007 in
+`docs/spec.md`). That is a separate, intentional choice for a re-loadable
+database and is **not** a reason to weaken the queue further. The two pragmas
+cannot interfere: `_configure_sqlite_pragmas` is bound to SQLAlchemy
+`connect` events for `db.engine` / `db.engines['users']`, while huey opens
+`huey.db` through its own raw `sqlite3` connection that never goes through
+SQLAlchemy.
 
 ## Related code
 

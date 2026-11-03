@@ -745,3 +745,72 @@ def test_security_page_shows_last_password_change_and_signout_notice(client, app
     assert "Last Password Change" in html
     assert expected_date in html
     assert "signs you out on all devices" in html
+
+
+def test_reset_password_rejects_whitespace_only(client, app, user_factory):
+    from poi_broker import db
+    from poi_broker.auth import hash_token
+    from poi_broker.models import User
+
+    user_factory(email="ws-reset@example.com")
+    raw_token = "reset-ws-only-token"
+    with app.app_context():
+        user = User.query.filter_by(email="ws-reset@example.com").first()
+        original_hash = user.password
+        user.reset_token = hash_token(raw_token)
+        user.reset_token_expires = int(time.time()) + 3600
+        db.session.commit()
+
+    response = client.post(
+        f"/reset-password/{raw_token}",
+        data={"password": " " * 8, "password_confirm": " " * 8},
+        follow_redirects=False,
+    )
+    assert response.status_code == 302
+    assert "/reset-password/" in (response.headers.get("Location") or "")
+
+    with app.app_context():
+        user = User.query.filter_by(email="ws-reset@example.com").first()
+        assert user.password == original_hash
+        assert user.reset_token is not None
+
+
+def test_change_password_rejects_whitespace_only(client, user_factory):
+    user_factory(email="ws-change@example.com")
+    client.post(
+        "/login",
+        data={"email": "ws-change@example.com", "password": "Password123!"},
+        follow_redirects=False,
+    )
+    response = client.post(
+        "/change-password",
+        data={
+            "current_password": "Password123!",
+            "new_password": " " * 8,
+            "new_password_confirm": " " * 8,
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 302
+    assert "/security" in (response.headers.get("Location") or "")
+    assert client.get("/security", follow_redirects=False).status_code == 200
+
+
+def test_export_csrf_failure_returns_json(secure_app, secure_client):
+    from poi_broker import db
+    from poi_broker.models import User
+
+    with secure_app.app_context():
+        user_id = _create_verified_user(db, User, "export-csrf@example.com", "Password123!", "Export CSRF")
+
+    _force_login(secure_client, user_id)
+    response = secure_client.post(
+        "/export",
+        json={
+            "condition": "AND",
+            "rules": [{"field": "featuretable.alert_id", "operator": "is_not_null"}],
+        },
+    )
+    assert response.status_code == 400
+    assert response.is_json
+    assert response.get_json().get("error") == "csrf validation failed"

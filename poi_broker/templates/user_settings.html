@@ -17,7 +17,7 @@
             <div class="card-body">
                 <p class="text-muted">Choose which features should be selected by default when the feature plot modal opens.</p>
 
-                <form method="post" novalidate>
+                <form method="post" novalidate data-single-submit>
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
                     <div class="form-group">
                         <label for="default_feature_plot_columns">Your Feature Plot Columns</label>

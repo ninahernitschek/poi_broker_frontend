@@ -1,69 +1,64 @@
 # Deployment: session invalidation (`user.password_changed_at`)
 
+## Current release: signed reset links and atomic credential updates
+
+This release requires **no new `apply_*.sql` script**. It reuses the existing
+`password_changed_at`, `reset_token`, and `reset_token_expires` columns. No
+production data rewrite is needed; do not clear existing reset hashes or change
+NULL revisions as part of deployment. Previously emailed links remain valid
+until their original expiry or a successful password change/reset.
+
+1. Install the updated requirements (`itsdangerous==2.*` is now an explicit
+   dependency; it is also a Flask dependency).
+2. Keep the existing strong `SECRET_KEY` unchanged and identical across all web
+   workers. A changed key invalidates signed links and sessions.
+3. Restart the web service so **all** Gunicorn workers use the new implementation.
+   Avoid a mixed old/new rolling deployment: old workers cannot validate new
+   `v1.` links and still replace legacy reset hashes when sending another email.
+4. Verify that two reset requests leave the earlier email link usable; using
+   either link must invalidate both links and existing sessions. Repeat SMTP
+   failure checks with a test mail backend, not real user accounts.
+
+New reset requests do not write token fields. Signed links expire after one hour
+and are bound to the current credential revision. Both password-write routes use
+an atomic conditional UPDATE and monotonically advance that revision, including
+same-second changes. Existing sessions retain the timestamp compatibility check;
+new sessions also record the exact credential revision verified at login.
+
+**Rollback:** restoring the previous code immediately makes newly issued signed
+links unusable. To preserve emailed links, retain the new validator/write logic
+until the last signed link has expired (one hour after the final new-format
+issuance). There is no schema rollback or DB modification needed for this
+release. The column-removal instructions below concern the historical migration,
+not this release.
+
+## Historical column deployment
+
+> **Historical record — this migration has been applied.** Both one-shot
+> scripts referenced below were applied to the production `users.db` and
+> removed from the repository in 2026-10
+> (`docs/adr/adr_db_schema_migration_strategy.md`). Fresh installations get
+> both columns from `tools/usersdb_schema.sql`. Do not try to run the
+> scripts; keep this page as the deployment record.
+
 Password resets and password changes now end **every** existing session and
 remembered login for that account. This is enforced by a new epoch-seconds
 column, `password_changed_at`, on the `user` table of the **users database**
-(`users.db` only — the alerts database is untouched).
+(`users.db` only — the alerts database is untouched), plus
+`email_verification_token_expires` which replaced a legacy boot-time ALTER
+helper.
 
-There is no auto-migration: **the application never alters the database.**
-Schema upgrades are applied manually with one-shot SQL scripts in `tools/`
-(before v3.6 the boot-time helper `_ensure_email_verification_expiry_column`
-auto-added one column; that helper is removed, hence the conditional step
-below). Both changes are single-column `ALTER TABLE`s and are safe to apply
-while the app is running.
-
-## 1. Locate the users DB and check current columns
-
-The path comes from `USERS_DB_PATH` in the app's environment (`.env`), which
-defaults to a sibling `_broker_db/users.db` outside the repository.
-
-```bash
-sqlite3 "$USERS_DB_PATH" "PRAGMA table_info(user);"
-```
-
-Look at the `name` column of the output:
-
-| Output contains          | Means                        | Action             |
-| ------------------------ | ---------------------------- | ------------------ |
-| `password_changed_at`    | Already migrated             | Skip step 2a       |
-| `email_verification_token_expires` | Boot helper ran its ALTER on this site previously | Skip step 2b |
-| Neither                  | Pre-v3.5 schema              | Run both 2a and 2b |
-
-## 2. Apply the one-shot SQL script(s)
-
-**Do not re-run a script against an already-migrated database** — SQLite's
-`ADD COLUMN` fails if the column exists (see Troubleshooting).
-
-### 2a. Required for this release
-
-```bash
-sqlite3 "$USERS_DB_PATH" < tools/apply_password_changed_at.sql
-```
-
-### 2b. Only when upgrading across versions that shipped the boot-time helper
-
-```bash
-sqlite3 "$USERS_DB_PATH" < tools/apply_email_verification_expiry.sql
-```
-
-## 3. Restart
-
-Restart the Gunicorn service hosting the web app as usual
-(`<your-poi-broker-web-unit>` is whatever unit runs `wsgi:app`; the Huey
-worker needs no restart, but restarting it does no harm):
-
-```bash
-sudo systemctl restart <your-poi-broker-web-unit>
-```
-
-Apply the script(s) **before** restarting: once the app boots against the new
+There was no auto-migration: **the application never alters the database.**
+The two schema upgrades were applied manually with one-shot SQL scripts
+(`tools/apply_password_changed_at.sql`, `tools/apply_email_verification_expiry.sql`),
+run before restarting the web service — once the app boots against the new
 ORM, any authenticated request hits a SELECT referencing
 `password_changed_at`, which errors out with `no such column` until the
-column exists. The reverse order (script first) has no such window.
+column exists.
 
-## What changes for users
+## What changed for users
 
-- Nobody is logged out by the deployment itself. Accounts untouched by their
+- Nobody was logged out by the deployment itself. Accounts untouched by their
   owner (`password_changed_at` still NULL) behave exactly as before,
   remember-me included.
 - The first time each user changes their password (or uses a reset link),
@@ -75,22 +70,8 @@ column exists. The reverse order (script first) has no such window.
   timestamp against the newer `password_changed_at`. Browsers drop them at
   cookie expiry or the next sign-in on that device.
 
-## Rollback
+## Rollback (if ever needed)
 
-No rollback is required for a mistaken upgrade: the column is additive and
-nullable, and old code ignores it. To fully revert, remove it with
-`ALTER TABLE user DROP COLUMN password_changed_at;` (SQLite ≥ 3.35) and
-restart on the previous release.
-
-## Troubleshooting
-
-### `duplicate column name: password_changed_at`
-
-The script ran twice, or the column pre-exists. Nothing is damaged — verify
-with `PRAGMA table_info(user);` and move on.
-
-### `no such table: user`
-
-Wrong database file: re-check `USERS_DB_PATH`. Note there are two SQLite
-files in play (`ztf_alerts_stream.db`, `users.db`); both migration scripts
-belong to the users one.
+The column is additive and nullable, and old code ignores it. To fully revert,
+remove it with `ALTER TABLE user DROP COLUMN password_changed_at;`
+(SQLite ≥ 3.35) and restart on the previous release.

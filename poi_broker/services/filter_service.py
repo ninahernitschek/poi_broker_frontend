@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import Any, Callable, List, Optional, Protocol
+from typing import Any, Callable, List, Protocol
 from sqlalchemy.orm import Query
 from astropy.time import Time
 from . input_parser import ParsedValue

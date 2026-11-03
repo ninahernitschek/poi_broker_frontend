@@ -47,7 +47,7 @@ You are an expert in Python, Flask, and SqlAlchemy development.
 
   Catalog list (GET /)
   - Do not use Flask-SQLAlchemy paginate() on the catalog; it runs a joined COUNT(*) on every request.
-  - Use poi_broker.services.catalog_list (keyset for date-only sort, OFFSET+1 otherwise) and catalog_query for shared filters.
+  - Use poi_broker.services.catalog_list (keyset for every supported sort; capped OFFSET for legacy numbered pages) and catalog_query for shared filters.
   - Exact Rows only when cheap or via GET /api/catalog-count; do not COUNT unselective filters on the list request.
 
   Plot empty states (do not 404)
@@ -60,7 +60,7 @@ You are an expert in Python, Flask, and SqlAlchemy development.
   - Organize routes using Flask Blueprints for better code organization.
   - Implement custom error handlers for different types of exceptions.
   - Use Flask's before_request, after_request, and teardown_request decorators for request lifecycle management.
-  - Utilize Flask extensions for common functionalities (e.g., Flask-SQLAlchemy, Flask-Migrate).
+  - Utilize the existing Flask extensions; schema changes follow the one-shot SQL migration ADRs.
   - Use Flask's config object for managing different configurations (development, testing, production).
   - Use Flask-Login for handling authentication and authorization.
 
@@ -69,7 +69,7 @@ You are an expert in Python, Flask, and SqlAlchemy development.
   - Implement database query optimization techniques (e.g., eager loading, indexing).
   - Use connection pooling for database connections.
   - Implement proper database session management.
-  - Use background tasks for time-consuming operations (e.g., Celery with Flask).
+  - Use the existing Huey background worker for time-consuming operations.
 
   Key Conventions
   1. Use Flask's application context and request context appropriately.
@@ -81,7 +81,7 @@ You are an expert in Python, Flask, and SqlAlchemy development.
 
   Database Interaction
   - Use Flask-SQLAlchemy for ORM operations (models)
-  - Implement database migrations using Flask-Migrate.
+  - Use one-shot apply scripts for existing databases and full schemas only for fresh installations. Original upstream main defines completion; see docs/adr/adr_migration_completion_status.md.
   - Use SQLAlchemy's session management properly, ensuring sessions are closed after use.
 
   Authentication and Authorization

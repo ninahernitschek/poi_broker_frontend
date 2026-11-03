@@ -161,3 +161,33 @@ def test_filter_bookmarks_cross_user_delete(app, auth_client):
     with app.app_context():
         still = db.session.get(FilterBookmark, foreign_id)
         assert still is not None
+
+
+def test_filter_bookmarks_reject_non_string_name(auth_client):
+    r = auth_client.post("/api/filter-bookmarks", json={"name": 12345, "params": {}})
+    assert r.status_code == 400
+    assert r.is_json
+    assert "name" in r.get_json()["error"].lower()
+
+
+def test_bookmark_allowed_keys_derived_from_catalog_query():
+    """auditSBA F6: ALLOWED_KEYS must track the authoritative catalog key
+    sets instead of a hand-maintained copy, and must never contain
+    pagination keys."""
+    from poi_broker.routes.filter_bookmarks import ALLOWED_KEYS
+    from poi_broker.services.catalog_query import FILTER_KEYS, PAGINATION_KEYS, SORT_KEYS
+
+    assert ALLOWED_KEYS == frozenset(FILTER_KEYS) | {f'sort__{key}' for key in SORT_KEYS}
+    assert not ALLOWED_KEYS & PAGINATION_KEYS
+
+
+def test_bookmark_save_js_receives_pagination_keys(auth_client):
+    """The bookmark-save JS strips the pagination keys injected into the
+    page. Saving from a keyset-paginated URL used to 400 with
+    'unknown parameter: before_mjd' because the client only stripped
+    page/survey/options (auditSBA F6)."""
+    from poi_broker.services.catalog_query import PAGINATION_KEYS
+
+    html = auth_client.get("/").get_data(as_text=True)
+    for key in sorted(PAGINATION_KEYS):
+        assert f'"{key}"' in html

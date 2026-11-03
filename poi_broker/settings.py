@@ -69,6 +69,7 @@ def build_app_config(base_dir):
 	auth_forgot_limit = os.environ.get('AUTH_RATE_LIMIT_FORGOT_PASSWORD', '5 per hour').strip() or '5 per hour'
 	auth_reset_limit = os.environ.get('AUTH_RATE_LIMIT_RESET_PASSWORD', '10 per hour').strip() or '10 per hour'
 	auth_change_pw_limit = os.environ.get('AUTH_RATE_LIMIT_CHANGE_PASSWORD', '10 per hour').strip() or '10 per hour'
+	auth_verify_email_limit = os.environ.get('AUTH_RATE_LIMIT_VERIFY_EMAIL', '10 per hour').strip() or '10 per hour'
 	read_rate_limit_lax = os.environ.get('READ_RATE_LIMIT_LAX', '30 per minute').strip() or '30 per minute'
 	read_rate_limit_medium = os.environ.get('READ_RATE_LIMIT_MEDIUM', '15 per minute').strip() or '15 per minute'
 
@@ -91,7 +92,13 @@ def build_app_config(base_dir):
 			'users': login_db_uri,
 		},
 		'SQLALCHEMY_TRACK_MODIFICATIONS': False,
+		# Set to zero to disable optional counts on slower deployments.
+		'CATALOG_COUNT_BUDGET_SECONDS': max(0.0, float(os.environ.get('CATALOG_COUNT_BUDGET_SECONDS', '2.0'))),
 		'SECRET_KEY': secret_key,
+		# The app has no file uploads and its JSON payloads (query-builder
+		# rules, favorites, settings) are KB-scale; bound request bodies so a
+		# single oversized request cannot pin memory or bloat stored rows.
+		'MAX_CONTENT_LENGTH': 1024 * 1024,
 		'PERMANENT_SESSION_LIFETIME': timedelta(hours=session_lifetime_hours),
 		'SESSION_COOKIE_SECURE': session_cookie_secure,
 		'SESSION_COOKIE_HTTPONLY': True,
@@ -110,6 +117,7 @@ def build_app_config(base_dir):
 		'AUTH_RATE_LIMIT_FORGOT_PASSWORD': auth_forgot_limit,
 		'AUTH_RATE_LIMIT_RESET_PASSWORD': auth_reset_limit,
 		'AUTH_RATE_LIMIT_CHANGE_PASSWORD': auth_change_pw_limit,
+		'AUTH_RATE_LIMIT_VERIFY_EMAIL': auth_verify_email_limit,
 		'READ_RATE_LIMIT_LAX': read_rate_limit_lax,
 		'READ_RATE_LIMIT_MEDIUM': read_rate_limit_medium,
 	}

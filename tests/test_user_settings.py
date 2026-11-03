@@ -189,3 +189,12 @@ class TestSingleLoadUserSettings:
             r = client.get('/')
             assert r.status_code == 200
             mock_get.assert_not_called()
+
+
+def test_feature_column_list_is_derived_from_feature_columns():
+    # /settings validates saved defaults against FEATURE_COLUMNS while the
+    # feature-plot route validates against FEATURE_COLUMN_LIST; they must be
+    # one list so a column cannot be accepted by one and dropped by the other.
+    from poi_broker.constants.features import FEATURE_COLUMN_LIST, FEATURE_COLUMNS
+
+    assert FEATURE_COLUMN_LIST == list(FEATURE_COLUMNS)

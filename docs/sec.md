@@ -87,9 +87,67 @@ The CSP header acts as a gatekeeper, specifying trusted sources for content type
 
 Plot endpoints (`/query_classification`, `/query_lightcurve_data`, `/query_featureplot_data`) return JSON `{div, script}` rather than concatenated HTML. Empty plot data is HTTP 200 with a static warning `div` and empty `script` via `bokeh_warning_payload()` — **not** 404/`{error}` (that paints a red modal error). The catalog modal inserts the Bokeh `div` and evaluates only the JSON `script` field. Classification never echoes `alertId`. Observing plots return JSON `{image, moonHtml}` (moon up), `{image, moonMessage}` (moon down), or `{message}` (not visible). The client styles `message`/`moonMessage` via `textContent` (not innerHTML) and sets `img.src` only when the value is a `data:image/png;base64,` URL. Last-selected observatory is written only by authenticated `POST /api/last-observatory` with `X-CSRFToken`, not by `GET /query_observing_plot`. Export status errors use `textContent`.
 
-Signup (`POST /signup`) uses one generic flash and a `/login` redirect for a new account, a duplicate email, and a uniqueness race, so the response is not an account-existence oracle. Forgot-password (`POST /forgot-password`) uses one generic flash for an existing email, a missing email, and a mail/commit failure. Invalid email/password/name stay distinct validation errors; a signup mail send failure stays an operational error. Verification tokens expire after 24 hours (`email_verification_token_expires`); reset tokens expire after 1 hour. Set `PUBLIC_BASE_URL` (e.g. `https://poibroker.example.edu`) so verification/reset emails do not take their host from `Host` / `X-Forwarded-Host`. `ProxyFix(..., x_host=1)` trusting one hop of `X-Forwarded-Host` is an accepted risk: the documented deployment binds Gunicorn to loopback behind nginx (`proxy_pass http://127.0.0.1:8000`, with nginx setting `X-Forwarded-Host: $server_name`), in-app redirects use relative `url_for()`, and a set `PUBLIC_BASE_URL` overrides the host for the only host-sensitive output (emailed links) — so a spoofed forwarded host has no effect unless the proxy is bypassed or misconfigured. `RATELIMIT_STORAGE_URI` defaults to `memory://` (per-process); multi-worker Gunicorn must set a shared backend URI. HTML CSRF failures redirect to `request.path`, not `Referer`. Catalog modal query strings encode `locusId` / `alertId` with `encodeURIComponent`. Bokeh JS is served same-origin from the installed package (`GET /bokeh.min.js`); QueryBuilder JS/CSS are local static snapshots with no CDN fallback. Do not attach SRI to a jsDelivr minify URL for those files — jsDelivr may re-minify and the hash will not stay valid.
+Signup (`POST /signup`) uses one generic flash and a `/login` redirect for a new account, a duplicate email, and a uniqueness race, so the response is not an account-existence oracle. Forgot-password (`POST /forgot-password`) uses one generic flash for an existing email, a missing email, and a mail/signing failure. Invalid email/password/name stay distinct validation errors; a signup mail send failure stays an operational error. Verification tokens expire after 24 hours (`email_verification_token_expires`); reset tokens expire after 1 hour. Set `PUBLIC_BASE_URL` (e.g. `https://poibroker.example.edu`) so verification/reset emails do not take their host from `Host` / `X-Forwarded-Host`. `ProxyFix(..., x_host=1)` trusting one hop of `X-Forwarded-Host` is an accepted risk: the documented deployment binds Gunicorn to loopback behind nginx (`proxy_pass http://127.0.0.1:8000`, with nginx setting `X-Forwarded-Host: $server_name`), in-app redirects use relative `url_for()`, and a set `PUBLIC_BASE_URL` overrides the host for the only host-sensitive output (emailed links) — so a spoofed forwarded host has no effect unless the proxy is bypassed or misconfigured. `RATELIMIT_STORAGE_URI` defaults to `memory://` (per-process); multi-worker Gunicorn must set a shared backend URI. HTML CSRF failures redirect to `request.path`, not `Referer`. Catalog modal query strings encode `locusId` / `alertId` with `encodeURIComponent`. Bokeh JS is served same-origin from the installed package (`GET /bokeh.min.js`); QueryBuilder JS/CSS are local static snapshots with no CDN fallback. Do not attach SRI to a jsDelivr minify URL for those files — jsDelivr may re-minify and the hash will not stay valid.
 
-Any password write (reset or change) ends **every** session and remembered login for the account: `user.password_changed_at` (epoch seconds) is stamped at the write, `POST /login` records a `login_at` epoch in the signed session, and the `user_loader` rejects any request whose session lacks an integer `login_at > password_changed_at` (the watermark second itself belongs to the old credential — see the ADR). Remember-cookie restores land in a fresh session without `login_at`, so they are rejected too — this is the mechanism that "drops" remember-me on password change; the acting browser is also logged out (`logout_user()` expires its `remember_token` cookie). Accounts with `password_changed_at IS NULL` (never rotated) keep the pre-existing behavior, so deployment itself logs nobody out. The application never alters the database: upgrades are manual one-shot scripts (`tools/apply_password_changed_at.sql`, run **before** restarting — see `docs/password_reset/deployment.md`); `tests/test_security_regressions.py::test_boot_does_not_alter_legacy_users_db` pins that policy. Design rationale: `docs/password_reset/adr_session_invalidation.md`.
+## Password reset links and credential changes
+
+New reset links are signed with `itsdangerous.URLSafeTimedSerializer`, a reset-only salt
+(`poi-broker-password-reset-v1`), HMAC-SHA256 and the configured `SECRET_KEY`.
+The signed payload contains the user ID, the current credential revision, and a
+cryptographically random 32-byte nonce. Links expire one hour after issuance;
+signing provides integrity, not encryption, and a reset link remains a bearer
+credential. All workers must use the same strong `SECRET_KEY`. Changing that key
+invalidates outstanding signed links as well as Flask sessions.
+
+Requesting another reset email **does not invalidate earlier links or change
+account state**. Every link keeps its own original expiry. SMTP acceptance is not
+proof of delivery, so neither successful sending nor sending failure replaces an
+existing link. Reset requests retain the generic response and existing rate
+limits. A valid GET only displays the form and sets `Referrer-Policy: no-referrer`;
+the CSRF-protected POST performs the credential change.
+
+Both password-reset and authenticated password-change POSTs use one conditional
+SQL UPDATE against the user ID, previously read password hash, and credential
+revision. The winner changes the password and advances `password_changed_at` to
+`max(current_epoch_second, previous_revision + 1)` in the same transaction. A
+stale competing request changes zero rows and cannot overwrite the winner. Expiry
+is checked again after hashing the proposed password. Signing/expiry alone do
+not provide single-use protection: the conditional database write and revision
+advance invalidate every reset link from the previous revision.
+
+`password_changed_at` reuses the existing INTEGER column as a **monotonic,
+epoch-based credential revision**. It remains suitable for the displayed UTC date,
+but can advance ahead of wall-clock seconds after closely spaced changes; it is
+not an exact event-time audit trail. New logins store the exact `password_revision`
+of the credential they checked, as well as the existing `login_at` timestamp. The
+loader rejects revision mismatches, including a login overlapping a credential
+change. Sessions issued before this release keep the timestamp fallback: when a
+watermark exists, `login_at` must be an integer strictly greater than it. Every
+successful password write ends all existing sessions and remembered logins,
+including the acting browser, which is explicitly logged out. Accounts with a
+NULL revision retain their pre-existing session/remember behavior until rotation.
+
+Previously emailed random reset links remain supported using their stored
+SHA-256 hashes and original `reset_token_expires`. New reset requests leave those
+legacy fields untouched. A successful reset or password change atomically clears
+them; legacy-token consumption also includes the stored token hash and expiry in
+the conditional UPDATE. Neither failed writes nor SMTP failures consume a valid
+link. There is no account lock held while waiting for email or user interaction.
+
+**No schema migration is required for this release.** Existing deployments already
+have `password_changed_at`, `reset_token` and `reset_token_expires`. The application
+never alters the database; retain the historical migration record and the
+`test_boot_does_not_alter_legacy_users_db` invariant. See
+`docs/password_reset/deployment.md` for coordinated rollout/rollback notes and
+`docs/password_reset/adr_session_invalidation.md` for the session design.
+
+This design follows the relevant expiration, single-use, account-lockout and
+session-revocation principles in the
+[OWASP Forgot Password Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Forgot_Password_Cheat_Sheet.html).
+Keeping older links valid until their original expiry is an availability policy
+for unreliable email. Losing access to the email account still requires an
+independently verified support/recovery process.
+
 
 Remember-me (`REMEMBER_COOKIE_DURATION`, 14 days, `settings.py`) is deliberately **not** bound to IP or User-Agent and its token is **not** rotated on use: a captured cookie replays unchanged for the full window with no fingerprint check to detect it. This is an accepted trade-off, not an oversight: the cookie is `HttpOnly`/`Secure`/`SameSite`, the lifetime is capped, and a password change invalidates every remembered login via the `password_changed_at` watermark above — the user has a one-step kill switch if compromise is suspected. Do not "harden" this by hashing User-Agent or IP into the token without revisiting the decision: mobile clients behind rotating NAT would be logged out mid-window, and it adds code paths this threat model does not require.
 

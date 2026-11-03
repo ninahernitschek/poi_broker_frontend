@@ -291,7 +291,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
     function loadFilterBookmarks() {
         filterBookmarkPanels.innerHTML = '<div class="p-3 text-muted text-center">Loading filter bookmarks...</div>';
-        fetch('/api/filter-bookmarks')
+        return fetch('/api/filter-bookmarks')
             .then(r => r.json())
             .then(data => {
                 const items = Array.isArray(data.filterBookmarks) ? data.filterBookmarks : [];
@@ -306,9 +306,11 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     newGroupBtn.addEventListener('click', function () {
+        if (newGroupBtn.disabled) return;
         const name = prompt('Enter group name:');
         if (!name || !name.trim()) return;
-        
+        const release = window.PoiPendingActions.begin(newGroupBtn);
+        if (!release) return;
         fetch('/api/favorite-groups', {
             method: 'POST',
             headers: { 
@@ -326,13 +328,14 @@ document.addEventListener('DOMContentLoaded', function () {
                 showToast(data.error, 'error');
             } else {
                 showToast('Group created successfully', 'success');
-                loadGroups(getActiveTabId());
+                return loadGroups(getActiveTabId());
             }
         })
         .catch(e => {
             console.error(e);
             showToast(fetchFailureMessage(e, 'Failed to create group'), 'error');
-        });
+        })
+        .finally(release);
     });
 
     function getActiveTabId() {
@@ -344,7 +347,7 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     function loadGroups(activeTabId = null) {
-        fetch('/api/favorite-groups')
+        return fetch('/api/favorite-groups')
             .then(r => {
                 if (!r.ok) throw new Error('Failed to load favorite groups');
                 return r.json();
@@ -425,9 +428,10 @@ document.addEventListener('DOMContentLoaded', function () {
 
                 const activeListId = activeTabId === 'all' ? 'list-all' : `list-${activeTabId}`;
                 const activeList = document.getElementById(activeListId);
+                let activeLoad = null;
                 if (activeList) {
                     activeList.dataset.loaded = '1';
-                    loadFavorites(activeTabId === 'all' ? null : activeTabId);
+                    activeLoad = loadFavorites(activeTabId === 'all' ? null : activeTabId);
                 }
 
                 // --- Activate tab explicitly if needed (in case it was lost during re-render) ---
@@ -435,6 +439,7 @@ document.addEventListener('DOMContentLoaded', function () {
                 if (activeLink) {
                     $(activeLink).tab('show');
                 }
+                return activeLoad;
             })
             .catch(e => {
                 console.error(e);
@@ -468,7 +473,7 @@ document.addEventListener('DOMContentLoaded', function () {
         const url = groupId === null ? '/api/favorites?groupId=null' : `/api/favorites?groupId=${groupId}`;
         const listId = groupId === null ? 'list-all' : `list-${groupId}`;
 
-        fetch(url)
+        return fetch(url)
             .then(r => {
                 if (!r.ok) throw new Error('Failed to load favorites');
                 return r.json();
@@ -552,7 +557,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
     function loadWatchlists() {
         watchlistPanels.innerHTML = '<div class="p-3 text-muted text-center">Loading watchlists...</div>';
-        fetch('/api/watchlist')
+        return fetch('/api/watchlist')
             .then(r => r.json())
             .then(data => {
                 const items = Array.isArray(data.watchlists) ? data.watchlists : [];
@@ -574,6 +579,8 @@ document.addEventListener('DOMContentLoaded', function () {
         const removeFavBtn = clickEl.closest('.remove-fav-btn');
         if (removeFavBtn) {
             const locus = removeFavBtn.dataset.locus;
+            const release = window.PoiPendingActions.begin(removeFavBtn);
+            if (!release) return;
             fetch('/api/favorite', {
                 method: 'POST',
                 headers: { 
@@ -593,13 +600,14 @@ document.addEventListener('DOMContentLoaded', function () {
                         showToast(data.error, 'error');
                     } else {
                         showToast('Favorite removed', 'success');
-                        loadGroups();
+                        return loadGroups();
                     }
                 })
                 .catch(e => {
                     console.error(e);
                     showToast(fetchFailureMessage(e, 'Failed to remove favorite'), 'error');
-                });
+                })
+                .finally(release);
         }
 
         const moveFavBtn = clickEl.closest('.move-fav-btn');
@@ -613,8 +621,11 @@ document.addEventListener('DOMContentLoaded', function () {
 
         const deleteGroupBtn = clickEl.closest('.delete-group-btn');
         if (deleteGroupBtn) {
+            if (deleteGroupBtn.disabled) return;
             const groupId = deleteGroupBtn.dataset.id;
             if (!confirm('Delete this group? (Favorites will become ungrouped.)')) return;
+            const release = window.PoiPendingActions.begin(deleteGroupBtn);
+            if (!release) return;
             fetch(`/api/favorite-groups/${groupId}`, { 
                 method: 'DELETE',
                 headers: { 'X-CSRFToken': csrfToken }
@@ -630,19 +641,23 @@ document.addEventListener('DOMContentLoaded', function () {
                         showToast(data.error, 'error');
                     } else {
                         showToast('Group deleted successfully', 'success');
-                        loadGroups();
+                        return loadGroups();
                     }
                 })
                 .catch(e => {
                     console.error(e);
                     showToast(fetchFailureMessage(e, 'Failed to delete group'), 'error');
-                });
+                })
+                .finally(release);
         }
 
         const watchlistBtn = clickEl.closest('.remove-watchlist-btn');
         if (watchlistBtn) {
+            if (watchlistBtn.disabled) return;
             const watchlistId = watchlistBtn.dataset.watchlistId;
             if (!confirm('Delete this watchlist?')) return;
+            const release = window.PoiPendingActions.begin(watchlistBtn);
+            if (!release) return;
 
             fetch(`/api/watchlist/${watchlistId}`, {
                 method: 'DELETE',
@@ -659,19 +674,23 @@ document.addEventListener('DOMContentLoaded', function () {
                         showToast(data.error, 'error');
                     } else {
                         showToast('Watchlist deleted', 'success');
-                        loadWatchlists();
+                        return loadWatchlists();
                     }
                 })
                 .catch(error => {
                     console.error(error);
                     showToast('Failed to delete watchlist', 'error');
-                });
+                })
+                .finally(release);
         }
 
         const bookmarkBtn = clickEl.closest('.remove-filter-bookmark-btn');
         if (bookmarkBtn) {
+            if (bookmarkBtn.disabled) return;
             const bookmarkId = bookmarkBtn.dataset.bookmarkId;
             if (!confirm('Delete this filter bookmark?')) return;
+            const release = window.PoiPendingActions.begin(bookmarkBtn);
+            if (!release) return;
 
             fetch(`/api/filter-bookmarks/${bookmarkId}`, {
                 method: 'DELETE',
@@ -688,13 +707,14 @@ document.addEventListener('DOMContentLoaded', function () {
                         showToast(data.error, 'error');
                     } else {
                         showToast('Filter bookmark deleted', 'success');
-                        loadFilterBookmarks();
+                        return loadFilterBookmarks();
                     }
                 })
                 .catch(error => {
                     console.error(error);
                     showToast('Failed to delete filter bookmark', 'error');
-                });
+                })
+                .finally(release);
         }
     });
 

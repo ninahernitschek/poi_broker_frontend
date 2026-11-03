@@ -1,7 +1,7 @@
-# ADR: Epoch-based session invalidation on password change/reset
+# ADR: Monotonic credential revision and session invalidation
 
 - **Status:** Accepted
-- **Date:** 2026-08
+- **Date:** 2026-08; updated 2026-10-11
 - **Feature:** Auth session lifecycle (`poi_broker/auth.py`, `user_loader`)
 
 ## Context
@@ -17,26 +17,40 @@ them through the same `user_loader`).
 
 ## Decision
 
-Add an epoch-seconds watermark column `user.password_changed_at` (nullable,
-users DB) and a `login_at` epoch marker inside the signed session, written by
-`POST /login`. The `user_loader` — the single choke point through which both
-session cookies and remember-cookie restores authenticate — rejects the
-request unless the session carries an integer `login_at > password_changed_at`.
-Both password-write routes stamp the watermark and call `logout_user()`,
-which also expires the acting browser's remember-me cookie.
+Reuse the nullable INTEGER `user.password_changed_at` as a monotonic,
+epoch-based credential revision. Each password-reset or password-change route
+performs one conditional SQL UPDATE against the expected user ID, password hash
+and old revision, then sets the new revision to
+`max(now_epoch_second, old_revision + 1)` and clears legacy reset fields. Only one
+competing request can match. A failed update/commit does not consume a token or
+advance the revision. Closely spaced changes can advance the revision slightly
+ahead of wall time; its displayed date is approximate, not an exact audit record.
 
-Epoch-second stamps cannot order events inside the watermark second, so that
-second belongs to the old credential, hence the strict comparison. A
-successful `POST /login` necessarily presented the current credential, so the
-route stamps `login_at` just past the watermark
-(`max(now, password_changed_at + 1)`) rather than bouncing a legitimate login
-made in the same second as the write.
+New login sessions carry `password_revision`, the exact revision of the password
+that was checked, plus the existing `login_at` epoch marker. The loader rejects
+revision mismatches. This includes a login whose password check overlaps another
+request's credential change, even if login completes at a later timestamp.
 
-One uniform rule results: **any password write ends every session and
-remembered login for that account, including the browser performing the
-change.** `password_changed_at IS NULL` (account never rotated its password)
-skips the check entirely, so deployment logs nobody out and pre-existing
-remembered logins keep working until that account's first rotation.
+For sessions issued before this release, the existing timestamp rule remains:
+`login_at` must be an integer strictly greater than the non-NULL watermark. Login
+stamps it with `max(now, verified_revision + 1)` to allow a legitimate login in
+the same second as a write. The monotonic advance ensures the next password
+write invalidates that marker even in the same second. Both write routes call
+`logout_user()` on success, also clearing the acting browser's remember cookie.
+
+A NULL revision means the account has never rotated its password. Existing
+sessions/remember-cookie behavior remains compatible until its first rotation;
+deployment itself logs nobody out.
+
+New reset links are signed, contain the user ID, revision and random nonce, and
+expire after one hour. Issuance writes no account state, so a subsequent request
+or missing email does not invalidate an earlier link. GET only validates the
+link; the CSRF-protected POST conditionally changes the password. The revision
+advance revokes all links from the previous credential and makes a successful
+reset single-use. Legacy random links remain supported through their existing
+hashed-token/expiry fields, with additional token/expiry predicates in the write.
+No schema migration is needed for this update. See `docs/sec.md` and
+`docs/password_reset/deployment.md` for the rollout and rollback requirements.
 
 ## Alternatives considered
 
@@ -59,8 +73,7 @@ changes.
 Bumping `user.id` (or a token the remember cookie must match) would
 invalidate sessions only via the same loader check we built anyway — while
 `user.id` is referenced by half the users-DB foreign keys and embedded in the
-remember cookie. The watermark column delivers the identical effect with no
-FK churn.
+remember cookie. The monotonic revision delivers revocation with no FK churn.
 
 ## Consequences
 
@@ -72,31 +85,35 @@ FK churn.
   logins stop resurrecting sessions once the browser-side session expires
   (default 24h): a bare remember token carries no `login_at` and proves
   nothing about credential freshness. Deliberate, documented tradeoff.
-- Deploy order matters: apply `tools/apply_password_changed_at.sql` **before**
-  restarting into the new ORM, or authenticated pages 500 on the missing
-  column. Runbook: `docs/password_reset/deployment.md`.
+- Deploy order matters: `tools/apply_password_changed_at.sql` had to be
+  applied **before** restarting into the new ORM, or authenticated pages 500
+  on the missing column. Runbook: `docs/password_reset/deployment.md`.
+  [2026-10: applied in production; script removed — see
+  `docs/adr/adr_db_schema_migration_strategy.md`.]
 - The application never writes DDL. This ADR also removed the legacy
   boot-time helper (`_ensure_email_verification_expiry_column`); all schema
   upgrades are manual one-shot SQL scripts.
 
 ## Invariants (for implementers and coding agents)
 
-1. Every code path that writes `user.password` MUST also stamp
-   `user.password_changed_at` (currently `reset_password_post`,
-   `change_password`).
-2. Every successful `POST /login` MUST set `session['login_at']` to an epoch
-   integer; the loader treats a missing or non-int marker as absent
-   (reject-when-armed).
+1. Every code path that writes `user.password` MUST conditionally advance
+   `user.password_changed_at` in the same database UPDATE (currently
+   `reset_password_post`, `change_password`, through `_write_password`).
+2. Every successful `POST /login` MUST record the verified `password_revision`
+   and integer `login_at`. Revision checks must use the credential snapshot
+   that was actually checked, not a subsequently refreshed user row.
 3. The check lives in the `user_loader` only — it must not be duplicated into
    `before_request` hooks; the loader is the single point covering remember
    cookie restores too.
-4. Comparison is strict (`login_at < changed_at` rejects). Keep it that way:
-   equality surviving is what would let a same-second acting session stay
-   valid if the sign-out-everywhere rule is ever relaxed.
+4. New sessions must match the stored revision exactly. The compatibility
+   timestamp check rejects `login_at <= changed_at`; every password write must
+   advance the revision even when the wall-clock second has not changed.
 5. Never re-introduce boot-time `ALTER TABLE` (auto-migration). Manual
    `tools/*.sql` only; pinned by `tests/test_security_regressions.py::
    test_boot_does_not_alter_legacy_users_db`.
-6. Automated tests: `tests/test_security_regressions.py` (invalidation set:
+6. Automated tests: `tests/test_password_reset_security.py` (email availability,
+   signed/legacy token races, same-second changes and overlapping login), plus
+   `tests/test_security_regressions.py` (invalidation set:
    reset kills sessions, change signs out everywhere, remember cookie
    cleared, boot does not alter legacy DB).
 
@@ -108,7 +125,7 @@ FK churn.
 | `poi_broker/auth.py` | `login_at` stamp; watermark + sign-out on reset/change |
 | `poi_broker/models.py` | `User.password_changed_at` column |
 | `poi_broker/app.py` | `epoch_utc_date` Jinja filter (Security page display) |
-| `tools/apply_password_changed_at.sql` | One-shot upgrade script |
+| `tools/apply_password_changed_at.sql` | One-shot upgrade script — applied in production; removed 2026-10 (see `docs/adr/adr_db_schema_migration_strategy.md`) |
 | `tools/usersdb_schema.sql` | Fresh-install schema (column included) |
 | `docs/password_reset/deployment.md` | Deploy/upgrade runbook |
 | `tests/test_security_regressions.py` | Behavior guards |

@@ -17,6 +17,7 @@ from poi_broker.user_settings import (
         ({'latitude': 10.0, 'longitude': 10.0}, 'name is required'),
         ({'name': '   ', 'latitude': 10.0, 'longitude': 10.0}, 'name is required'),
         ({'name': 'Test', 'latitude': 'not-a-number', 'longitude': 10.0}, 'latitude and longitude must be numeric'),
+        ({'name': 'Test', 'latitude': True, 'longitude': 10.0}, 'latitude and longitude must be numeric'),
         ({'name': 'Test', 'latitude': 100.0, 'longitude': 10.0}, 'latitude must be between -90 and 90'),
         ({'name': 'Test', 'latitude': 10.0, 'longitude': 200.0}, 'longitude must be between -180 and 180'),
     ],
@@ -187,6 +188,19 @@ def test_save_last_observatory_api_rejects_invalid_payload(auth_client):
     assert response.get_json()['error'] == 'Invalid observatory selection'
 
 
+def test_save_last_observatory_api_rejects_boolean_custom_id(auth_client):
+    create = auth_client.post(
+        '/api/user-observatories',
+        json={'name': 'Bool Id Obs', 'latitude': 10.0, 'longitude': 10.0},
+    )
+    assert create.status_code in (200, 201)
+    assert create.get_json()['id'] == 1
+
+    response = auth_client.post('/api/last-observatory', json={'source': 'custom', 'id': True})
+    assert response.status_code == 400
+    assert response.get_json()['error'] == 'Invalid observatory selection'
+
+
 def test_last_selected_observatory_serialization_roundtrip(auth_client, app):
     with app.app_context():
         current_user = db.session.query(User).filter_by(email='smoketest@example.com').first()
@@ -244,13 +258,16 @@ def test_get_builtin_observatory_options_is_cached(monkeypatch):
 
     monkeypatch.setattr('poi_broker.app.EarthLocation.get_site_names', fake_site_names)
 
-    first_result = _get_builtin_observatory_options()
-    second_result = _get_builtin_observatory_options()
+    try:
+        first_result = _get_builtin_observatory_options()
+        second_result = _get_builtin_observatory_options()
 
-    assert call_count['value'] == 1
-    assert first_result == second_result == [
-        {'value': 'builtin:Builtin Observatory', 'label': 'Builtin Observatory'},
-    ]
+        assert call_count['value'] == 1
+        assert first_result == second_result == [
+            {'value': 'builtin:Builtin Observatory', 'label': 'Builtin Observatory'},
+        ]
+    finally:
+        _get_builtin_observatory_options.cache_clear()
 
 
 def test_delete_user_observatory_is_idempotent(auth_client):

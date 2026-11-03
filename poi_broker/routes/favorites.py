@@ -26,8 +26,9 @@ def api_favorite_get():
     GET /api/favorite?locusId=...  -> returns {"fav": true/false}
     """
     locus_id = request.args.get('locusId')
-    if not locus_id:
+    if not isinstance(locus_id, str) or not locus_id.strip():
         return jsonify({'error': 'Missing locusId'}), 400
+    locus_id = locus_id.strip()
     if len(locus_id) > 128:
         return jsonify({'error': 'locusId is too long'}), 400
     fav = get_favorite_status(locus_id)
@@ -66,16 +67,17 @@ def api_favorite_post():
         return jsonify({'error': 'Invalid or missing JSON body'}), 400
     
     locus_id = data.get('locusId')
-    if not locus_id:
+    if not isinstance(locus_id, str) or not locus_id.strip():
         return jsonify({'error': 'Missing locusId'}), 400
-    if isinstance(locus_id, str) and len(locus_id) > 128:
+    locus_id = locus_id.strip()
+    if len(locus_id) > 128:
         return jsonify({'error': 'locusId is too long'}), 400
 
     if 'fav' not in data or not isinstance(data['fav'], bool):
         return jsonify({'error': 'fav must be a boolean'}), 400
 
     group_id = data.get('groupId')
-    if group_id is not None and not isinstance(group_id, int):
+    if group_id is not None and (not isinstance(group_id, int) or isinstance(group_id, bool)):
         return jsonify({'error': 'groupId must be an integer or null'}), 400
     
     result, status_code = toggle_favorite(locus_id, data['fav'], group_id)
@@ -117,7 +119,7 @@ def api_favorite_groups_get():
 def api_favorite_groups_post():
     """POST /api/favorite-groups -> create a new group. Body: {"name": "Group A"}"""
     data = request.get_json(silent=True)
-    if not data or not data.get('name'):
+    if not isinstance(data, dict) or not isinstance(data.get('name'), str) or not data.get('name'):
         return jsonify({'error': 'name required'}), 400
     
     result, status_code = create_favorite_group(data['name'])

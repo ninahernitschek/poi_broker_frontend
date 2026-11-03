@@ -6,6 +6,7 @@ import time
 from flask import Blueprint, current_app, jsonify, request, render_template
 from flask_login import login_required, current_user
 from sqlalchemy.exc import IntegrityError
+from werkzeug.exceptions import HTTPException
 from .. import db, limiter
 from ..models import Watchlist
 from ..services.query_service import get_preview_sql, get_query_match_count
@@ -24,6 +25,10 @@ def visual_query():
 
 @visual_query_bp.route('/api/preview-query', methods=['POST'])
 @login_required
+# Same limit as /api/export-query: preview compiles (and now bounds) rule
+# payloads per request, so it should not be cheaper to hammer than the
+# counting endpoint.
+@limiter.limit(lambda: current_app.config.get('READ_RATE_LIMIT_LAX', '30 per minute'))
 def preview_query():
     """Get SQL preview for a query builder payload."""
     try:
@@ -40,6 +45,14 @@ def preview_query():
         return jsonify({'sql': sql_preview})
     except ValueError as e:
         return jsonify({'error': str(e)}), 400 # ValueError is raised for known issues like invalid rules or no filters built, so return the message to client
+    except RecursionError:
+        # Deeply nested rules exhaust the stack inside json.loads / rule
+        # validation; the payload is unparseable, so this is a client error.
+        return jsonify({'error': 'Request payload is too deeply nested'}), 400
+    except HTTPException:
+        # Let Flask serve real HTTP errors (e.g. 413 for an oversized body)
+        # instead of masking them as a server error.
+        raise
     except Exception as e:
         logger.error(f'Error in preview_query: {str(e)}', exc_info=True)
         return jsonify({'error': 'Error in preview_query'}), 500
@@ -65,6 +78,10 @@ def export_query():
     except ValueError as e:
         logger.error(f'ValueError in export_query: {str(e)}', exc_info=True)
         return jsonify({'error': 'Invalid query rules provided.'}), 400
+    except RecursionError:
+        return jsonify({'error': 'Request payload is too deeply nested'}), 400
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f'Error in export_query: {str(e)}', exc_info=True)
         return jsonify({'error': 'An error occurred while exporting.'}), 500
@@ -79,9 +96,10 @@ def save_watchlist():
         if not isinstance(data, dict):
             return jsonify({'error': 'Invalid or missing JSON'}), 400
 
-        name = data.get('name', '').strip()
-        if not name:
+        name = data.get('name', '')
+        if not isinstance(name, str) or not name.strip():
             return jsonify({'error': 'Watchlist name is required'}), 400
+        name = name.strip()
         if len(name) > 128:
             return jsonify({'error': 'Watchlist name must be 128 characters or fewer'}), 400
 
@@ -116,7 +134,13 @@ def save_watchlist():
     except ValueError as e:
         db.session.rollback()
         logger.error(f"ValueError in save_watchlist: {str(e)}", exc_info=True)
-        return jsonify({'error': 'Unable to to save invalid querybuilder rules!'}), 406
+        return jsonify({'error': 'Unable to save invalid querybuilder rules!'}), 400
+    except RecursionError:
+        db.session.rollback()
+        return jsonify({'error': 'Request payload is too deeply nested'}), 400
+    except HTTPException:
+        db.session.rollback()
+        raise
     except Exception as e:
         db.session.rollback()
         logger.error(f"Error in save_watchlist: {str(e)}", exc_info=True)

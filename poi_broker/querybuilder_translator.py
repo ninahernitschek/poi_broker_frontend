@@ -55,6 +55,44 @@ INDEXED_ID_OPERATORS = frozenset(
     }
 )
 
+_GROUP_CONDITIONS = frozenset({'AND', 'OR'})
+
+# Upper bound on in / not_in list length. SQLite supports up to 32766 bind
+# parameters (SQLITE_MAX_VARIABLE_NUMBER since 3.32). Real multi-selects are
+# far below this; the 1000 limit bounds preview-SQL size and prevents excessive
+# bind expansion.
+MAX_IN_LIST_ITEMS = 1000
+
+
+def _group_condition(rules: dict) -> str:
+    """Return AND/OR from a rules group. Non-strings and unknown values are errors."""
+    condition = rules.get('condition', 'AND')
+    if not isinstance(condition, str) or condition.upper() not in _GROUP_CONDITIONS:
+        raise ValueError('Query condition must be AND or OR')
+    return condition.upper()
+
+
+def _assert_bind_scalar(value, operator_name: str) -> None:
+    """Reject dict/list binds that sqlite cannot render or execute."""
+    if isinstance(value, (dict, list, tuple)):
+        raise ValueError(f'Invalid value for operator "{operator_name}"') # noqa: TRY004 - routes map ValueError -> 400
+
+
+# LIKE-family operators take a single pattern string. The query-builder UI
+# splits comma input into arrays when a filter allows in/not_in
+# (value_separator), so LIKE rules can arrive as arrays. Join them back with
+# ',' to preserve the pre-separator literal (e.g. contains "a,b" matches the
+# literal "a,b") instead of 400ing. Each element is still scalar-validated.
+_LIKE_JOIN_OPERATORS = frozenset({
+    'contains',
+    'not_contains',
+    'begins_with',
+    'not_begins_with',
+    'ends_with',
+    'not_ends_with',
+})
+
+
 OPERATORS = {
     'equal': lambda f, a: f.__eq__(a),
     'not_equal': lambda f, a: f.__ne__(a),
@@ -105,19 +143,23 @@ class Filter(object):
         if not cond_list:
             return query
 
-        condition = rules.get('condition', 'AND').upper()
+        condition = _group_condition(rules)
         operator = or_ if condition == 'OR' else and_
         return query.filter(operator(*cond_list))
 
     def _make_query(self, query, rules):
         cond_list = []
         for cond in rules.get('rules', []):
+            if not isinstance(cond, dict):
+                raise ValueError('Invalid querybuilder rule') # noqa: TRY004 - routes map ValueError -> 400
             if 'condition' not in cond:
                 operator_name = cond.get('operator')
-                if operator_name not in self.operators:
-                    raise NotImplementedError(f'Unsupported operator: {operator_name}')
+                if not isinstance(operator_name, str) or operator_name not in self.operators:
+                    raise ValueError(f'Unsupported operator: {operator_name}')
 
                 field_name = cond.get('field', '')
+                if not isinstance(field_name, str):
+                    raise ValueError(f'Invalid field format: {field_name}')
                 parts = field_name.split('.', 1)
                 if len(parts) != 2:
                     raise ValueError(f'Invalid field format: {field_name}')
@@ -147,6 +189,9 @@ class Filter(object):
                     )
 
                 try:
+                    inspected = sa_inspect(model)
+                    if column_name not in inspected.columns:
+                        raise ValueError(f'Unknown field: {field_name}')
                     field = getattr(model, column_name)
                 except AttributeError as exc:
                     raise ValueError(f'Unknown field: {field_name}') from exc
@@ -163,12 +208,41 @@ class Filter(object):
                     if operator_name == 'between':
                         if not isinstance(value, (list, tuple)) or len(value) != 2:
                             raise ValueError('Operator "between" requires a two-item array value')
+                        for item in value:
+                            _assert_bind_scalar(item, operator_name)
                     elif operator_name in ('in', 'not_in'):
                         if not isinstance(value, (list, tuple)) or len(value) == 0:
                             raise ValueError(f'Operator "{operator_name}" requires a non-empty array value')
+                        if len(value) > MAX_IN_LIST_ITEMS:
+                            raise ValueError(
+                                f'Operator "{operator_name}" accepts at most '
+                                f'{MAX_IN_LIST_ITEMS} values'
+                            )
+                        for item in value:
+                            _assert_bind_scalar(item, operator_name)
                     else:
+                        # Select filters use multiple:true (required for in/not_in),
+                        # so they always emit an array even for single-value
+                        # operators. Unwrap a single selection so scalar ops keep
+                        # working; multi-selections stay a 400 (except LIKE ops,
+                        # which rejoin with ',' to preserve literal comma input).
+                        if isinstance(value, (list, tuple)):
+                            if operator_name in _LIKE_JOIN_OPERATORS:
+                                if len(value) == 0:
+                                    raise ValueError(f'Operator "{operator_name}" requires a value')
+                                for item in value:
+                                    _assert_bind_scalar(item, operator_name)
+                                value = ','.join(str(v) for v in value)
+                            elif len(value) == 1:
+                                value = value[0]
+                            elif len(value) > 1:
+                                # Multi-select UI (multiple:true) can emit an
+                                # array for single-value operators. Point the
+                                # caller at "in" instead of a bare 400.
+                                raise ValueError(f'Invalid value for operator "{operator_name}": requires a single value; use "in" for multiple values')
                         if value is None:
                             raise ValueError(f'Operator "{operator_name}" requires a value')
+                        _assert_bind_scalar(value, operator_name)
 
                     try:
                         cond_list.append(function(field, value))
@@ -178,7 +252,7 @@ class Filter(object):
                     raise NotImplementedError(f'Unsupported operator arity: {arity}')
             else:
                 query, cond_subrule = self._make_query(query, cond)
-                nested_condition = cond.get('condition', 'AND').upper()
+                nested_condition = _group_condition(cond)
                 nested_operator = or_ if nested_condition == 'OR' else and_
                 if cond_subrule:
                     cond_list.append(nested_operator(*cond_subrule))

@@ -13,6 +13,7 @@ from flask_login import current_user, login_required
 from sqlalchemy.exc import IntegrityError
 from .. import db
 from ..models import FilterBookmark
+from ..services.catalog_query import FILTER_KEYS, SORT_KEYS
 
 logger = logging.getLogger(__name__)
 
@@ -21,27 +22,11 @@ filter_bookmarks_bp = Blueprint('filter_bookmarks', __name__, url_prefix='/api')
 MAX_BOOKMARK_JSON_BYTES = 16384
 MAX_PARAM_VALUE_LEN = 512
 
-ALLOWED_KEYS = frozenset(
-    {
-        'date',
-        'date_alert_mjd',
-        'alert_id',
-        'ztf_object_id',
-        'ant_passband',
-        'locus_id',
-        'locus_ra',
-        'locus_dec',
-        'magpsf',
-        'prob_class',
-        'sort__date',
-        'sort__alert_id',
-        'sort__ztf_object_id',
-        'sort__locus_ra',
-        'sort__locus_dec',
-        'sort__ant_mag_corrected',
-        'sort__locus_id',
-    }
-)
+# Filter + sort URL params a bookmark may store, derived from the
+# authoritative key sets in catalog_query so the two cannot drift.
+# Pagination keys (catalog_query.PAGINATION_KEYS) stay excluded — the
+# bookmark-save JS strips them before posting (auditSBA F6).
+ALLOWED_KEYS = frozenset(FILTER_KEYS) | {f'sort__{key}' for key in SORT_KEYS}
 
 
 def _sanitize_params(raw: object) -> tuple[dict[str, str] | None, str | None]:
@@ -122,7 +107,10 @@ def create_filter_bookmark():
     if not isinstance(data, dict):
         return jsonify({'error': 'Invalid or missing JSON'}), 400
 
-    name = (data.get('name') or '').strip()
+    raw_name = data.get('name')
+    if not isinstance(raw_name, str):
+        return jsonify({'error': 'name is required'}), 400
+    name = raw_name.strip()
     if not name:
         return jsonify({'error': 'name is required'}), 400
     if len(name) > 200:

@@ -49,10 +49,10 @@
                 <a class="dropdown-item" href="{{ url_for('user_settings.settings') }}">Defaults</a>
                 <a class="dropdown-item" href="{{ url_for('auth.security') }}">Security</a>
                 <div class="dropdown-divider"></div>
-                <form id="logoutForm" method="POST" action="{{ url_for('auth.logout') }}" style="display: none;">
+                <form data-single-submit id="logoutForm" method="POST" action="{{ url_for('auth.logout') }}" style="display: none;">
                   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 </form>
-                <a class="dropdown-item" href="#" onclick="document.getElementById('logoutForm').submit(); return false;">Logout</a>
+                <a class="dropdown-item" href="#" onclick="document.getElementById('logoutForm').requestSubmit(); return false;">Logout</a>
               </div>
             </li>
           {% else %}

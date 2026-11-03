@@ -114,3 +114,181 @@ def test_authenticated_watchlist_crud(auth_client):
     assert r.status_code == 200
     assert r.is_json
     assert r.get_json().get("status") == "ok"
+
+
+def test_watchlist_rejects_non_string_name(auth_client):
+    r = auth_client.post(
+        "/api/watchlist",
+        json={"name": 12345, "rules": {
+            "condition": "AND",
+            "rules": [{"field": "featuretable.alert_id", "operator": "is_not_null"}],
+        }},
+    )
+    assert r.status_code == 400
+    assert r.is_json
+    assert "name" in r.get_json()["error"].lower()
+
+
+def test_preview_query_rejects_non_column_field(auth_client):
+    r = auth_client.post(
+        "/api/preview-query",
+        json={
+            "condition": "AND",
+            "rules": [{"field": "featuretable.classification", "operator": "is_null"}],
+        },
+    )
+    assert r.status_code == 400
+    assert r.is_json
+    assert "error" in r.get_json()
+
+
+def test_preview_query_rejects_unknown_table(auth_client):
+    r = auth_client.post(
+        "/api/preview-query",
+        json={
+            "condition": "AND",
+            "rules": [{"field": "unknown.alert_id", "operator": "is_not_null"}],
+        },
+    )
+    assert r.status_code == 400
+    assert r.is_json
+
+
+def test_preview_query_rejects_unsupported_operator(auth_client):
+    r = auth_client.post(
+        "/api/preview-query",
+        json={
+            "condition": "AND",
+            "rules": [{"field": "featuretable.alert_id", "operator": "totally_fake", "value": "x"}],
+        },
+    )
+    assert r.status_code == 400
+    assert r.is_json
+
+
+def test_preview_query_rejects_non_dict_rule(auth_client):
+    r = auth_client.post(
+        "/api/preview-query",
+        json={"condition": "AND", "rules": ["not-a-rule"]},
+    )
+    assert r.status_code == 400
+    assert r.is_json
+
+
+def test_preview_query_rejects_non_string_field(auth_client):
+    r = auth_client.post(
+        "/api/preview-query",
+        json={
+            "condition": "AND",
+            "rules": [{"field": ["featuretable", "alert_id"], "operator": "is_not_null"}],
+        },
+    )
+    assert r.status_code == 400
+    assert r.is_json
+
+
+def test_preview_query_rejects_non_string_condition(auth_client):
+    r = auth_client.post(
+        "/api/preview-query",
+        json={
+            "condition": 1,
+            "rules": [{"field": "featuretable.alert_id", "operator": "is_not_null"}],
+        },
+    )
+    assert r.status_code == 400
+    assert r.is_json
+
+
+def test_preview_query_rejects_dict_equal_value(auth_client):
+    r = auth_client.post(
+        "/api/preview-query",
+        json={
+            "condition": "AND",
+            "rules": [
+                {
+                    "field": "featuretable.alert_id",
+                    "operator": "equal",
+                    "value": {"a": 1},
+                }
+            ],
+        },
+    )
+    assert r.status_code == 400
+    assert r.is_json
+
+
+def test_export_query_rejects_dict_in_elements(auth_client):
+    r = auth_client.post(
+        "/api/export-query",
+        json={
+            "condition": "AND",
+            "rules": [
+                {
+                    "field": "featuretable.alert_id",
+                    "operator": "in",
+                    "value": [{}],
+                }
+            ],
+        },
+    )
+    assert r.status_code == 400
+    assert r.is_json
+
+
+def test_preview_query_accepts_in_with_array(auth_client):
+    r = auth_client.post(
+        "/api/preview-query",
+        json={
+            "condition": "AND",
+            "rules": [
+                {
+                    "field": "featuretable.alert_id",
+                    "operator": "in",
+                    "value": ["a", "b"],
+                }
+            ],
+        },
+    )
+    assert r.status_code == 200
+    assert r.is_json
+    assert "sql" in r.get_json()
+
+
+def test_preview_query_accepts_equal_with_single_element_array(auth_client):
+    r = auth_client.post(
+        "/api/preview-query",
+        json={
+            "condition": "AND",
+            "rules": [
+                {
+                    "field": "featuretable.ant_passband",
+                    "operator": "equal",
+                    "value": ["g"],
+                }
+            ],
+        },
+    )
+    assert r.status_code == 200
+    assert r.is_json
+    assert "sql" in r.get_json()
+
+
+def test_save_watchlist_rejects_invalid_rules_with_400(auth_client):
+    r = auth_client.post(
+        "/api/watchlist",
+        json={
+            "name": "Bad Rules",
+            "rules": {
+                "condition": "AND",
+                "rules": [
+                    {
+                        "field": "featuretable.alert_id",
+                        "operator": "equal",
+                        "value": ["a", "b"],
+                    }
+                ],
+            },
+        },
+    )
+    assert r.status_code == 400
+    assert r.is_json

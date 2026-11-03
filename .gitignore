@@ -49,6 +49,7 @@ coverage.xml
 *.py,cover
 .hypothesis/
 .pytest_cache/
+.ruff_cache/
 cover/
 
 # Translations
@@ -139,11 +140,11 @@ dmypy.json
 # Cython debug symbols
 cython_debug/
 
-
-
 # Editors
 .vscode/
 .idea/
+.kilo/
+.zcode/
 
 # Vagrant
 .vagrant/
@@ -153,3 +154,5 @@ cython_debug/
 
 # Windows
 Thumbs.db
+
+server_config/

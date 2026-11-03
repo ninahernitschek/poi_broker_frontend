@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import sys
+from html.parser import HTMLParser
 from pathlib import Path
 
 import pytest
@@ -265,6 +266,34 @@ def test_digest_run_rolls_back_session_after_orm_failure(app, monkeypatch):
     assert 'internal error' in body.lower()
 
 
+@pytest.mark.parametrize('dry_run', [True, False])
+def test_digest_processing_error_sends_no_email_in_dry_run(app, monkeypatch, caplog, dry_run):
+    digest = _load_digest()
+    with app.app_context():
+        user = User(email='dry-run@example.com', password='hashed', email_verified=True)
+        db.session.add(user)
+        db.session.commit()
+        db.session.add(Watchlist(
+            user_id=user.id, name='Broken watchlist', rules_json='{}',
+            sql_where='preview only', created_at=1711929600,
+        ))
+        db.session.commit()
+
+    monkeypatch.setattr(digest, 'create_app', lambda: app)
+    monkeypatch.setenv('ADMIN_EMAIL', 'admin@example.com')
+    sent = []
+    monkeypatch.setattr(digest, 'send_email', lambda **kwargs: sent.append(kwargs) or True)
+
+    assert digest.run(
+        limit=10, dry_run=dry_run, only_email='dry-run@example.com', skip_empty=False,
+    ) == 0
+    assert 'Failed watchlist id=' in caplog.text
+    if dry_run:
+        assert sent == []
+    else:
+        assert [mail['to_email'] for mail in sent] == ['admin@example.com', 'dry-run@example.com']
+
+
 def test_load_watchlists_selects_rules_json(app):
     digest = _load_digest()
 
@@ -321,3 +350,74 @@ def test_parse_watchlist_rules_rejects_invalid_json():
 def test_digest_module_does_not_concatenate_sql_where():
     text = DIGEST_PATH.read_text(encoding='utf-8')
     assert 'WHERE (" + sql_where' not in text
+
+
+class _EmailHTMLParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.tags = []
+        self.text = []
+        self.links = []
+
+    def handle_starttag(self, tag, attrs):
+        self.tags.append(tag)
+        if tag == 'a':
+            self.links.append(dict(attrs))
+
+    def handle_data(self, data):
+        self.text.append(data)
+
+
+def test_digest_html_preserves_dynamic_values_as_literal_text():
+    digest = _load_digest()
+    name = '<mark>User & "friends"</mark>'
+    watchlist_name = '<mark>Bright & "nearby"</mark>'
+    alert_id = '<mark>Alert & "one"</mark>'
+    day_label = '<mark>2026-10-10</mark>'
+    base_url = 'https://example.com/?label="night"&lang=en'
+    result = digest.WatchlistResult(1, watchlist_name, 'preview', [alert_id])
+
+    subject, plain_text, html_text = digest.build_email_content(
+        base_url, name, day_label, [result]
+    )
+    parsed = _EmailHTMLParser()
+    parsed.feed(html_text)
+
+    assert 'mark' not in parsed.tags
+    for value in (name, watchlist_name, alert_id, day_label):
+        assert value in ''.join(parsed.text)
+        assert value in plain_text
+    assert day_label in subject
+    assert len(parsed.links) == 1
+    assert parsed.links[0] == {
+        'href': digest.build_alert_link(base_url, alert_id),
+        'style': 'color:#1d4ed8; text-decoration:none;',
+    }
+
+
+@pytest.mark.parametrize('user_name', ['<mark>User & "friends"</mark>', None])
+def test_admin_error_html_preserves_dynamic_values_as_literal_text(monkeypatch, user_name):
+    digest = _load_digest()
+    user_email = '<mark>user@example.com</mark>'
+    watchlist_name = '<mark>Bright & "nearby"</mark>'
+    sql_where = 'featuretable.num_alerts < 10 AND label = \'<mark>value</mark>\''
+    error = '<mark>Invalid & "missing" value</mark>'
+    day_label = '<mark>2026-10-10</mark>'
+    row = {'watchlist_id': 42, 'watchlist_name': watchlist_name, 'sql_where': sql_where}
+    sent = []
+    monkeypatch.setattr(digest, 'send_email', lambda **kwargs: sent.append(kwargs) or True)
+
+    digest.send_admin_error_notification(
+        'admin@example.com', user_email, user_name, row, error, day_label
+    )
+
+    assert len(sent) == 1
+    parsed = _EmailHTMLParser()
+    parsed.feed(sent[0]['html_text'])
+    assert 'mark' not in parsed.tags
+    for value in (user_email, user_name or '<none>', watchlist_name, sql_where, error):
+        assert value in ''.join(parsed.text)
+        assert value in sent[0]['message']
+    assert day_label in ''.join(parsed.text)
+    assert day_label in sent[0]['subject']
+    assert sent[0]['to_email'] == 'admin@example.com'

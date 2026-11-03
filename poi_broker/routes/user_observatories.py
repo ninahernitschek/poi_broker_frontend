@@ -10,10 +10,10 @@ from astropy.coordinates import EarthLocation
 from flask import Blueprint, jsonify, request
 from flask_login import current_user, login_required
 from sqlalchemy.exc import IntegrityError
-from timezonefinder import TimezoneFinder
 
 from .. import db
 from ..models import UserObservatory
+from ..observing_tool import _get_timezone_finder
 from ..user_settings import (
     _normalize_last_selected_observatory,
     get_saved_last_selected_observatory,
@@ -40,9 +40,14 @@ def _validate_payload(raw: object) -> tuple[dict[str, float | str] | None, str |
     if len(name) > UserObservatory.MAX_NAME_LENGTH:
         return None, f'name must be {UserObservatory.MAX_NAME_LENGTH} characters or fewer'
 
+    latitude_raw = raw.get('latitude')
+    longitude_raw = raw.get('longitude')
+    # bool is a subclass of int, so float(True) == 1.0; reject it explicitly.
+    if isinstance(latitude_raw, bool) or isinstance(longitude_raw, bool):
+        return None, 'latitude and longitude must be numeric'
     try:
-        latitude = float(raw.get('latitude'))
-        longitude = float(raw.get('longitude'))
+        latitude = float(latitude_raw)
+        longitude = float(longitude_raw)
     except (TypeError, ValueError):
         return None, 'latitude and longitude must be numeric'
 
@@ -51,7 +56,7 @@ def _validate_payload(raw: object) -> tuple[dict[str, float | str] | None, str |
     if not (-180.0 <= longitude <= 180.0):
         return None, 'longitude must be between -180 and 180'
 
-    timezone_name = TimezoneFinder().timezone_at(lng=longitude, lat=latitude)
+    timezone_name = _get_timezone_finder().timezone_at(lng=longitude, lat=latitude)
     if not timezone_name:
         return None, 'Unable to resolve timezone for the provided coordinates'
 

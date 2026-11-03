@@ -2,6 +2,7 @@
 # Compile using pip-tools with: `pip-compile requirements.in -o requirements2.txt`
 # Or: `uv pip compile requirements.in -o requirements2.txt`
 Flask==3.*
+itsdangerous==2.*
 flask-login==0.6.*
 Flask-WTF==1.*
 Flask-SQLAlchemy==3.*

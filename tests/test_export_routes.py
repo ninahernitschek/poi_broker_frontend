@@ -333,10 +333,11 @@ def test_export_status_ok(auth_client, app):
 
 
 def test_export_sentinel_snapshot_mjd_renders_without_date(auth_client, app):
-    """Regression: rows backfilled by tools/apply_export_snapshot_mjd.sql
-    carry the "no cutoff" sentinel 1e9. MJD 1e9 is beyond datetime's year
-    range, so converting it used to 500 the export page and status endpoint;
-    both now render and simply omit the date."""
+    """Regression: export_task rows backfilled by the one-shot
+    tools/apply_export_snapshot_mjd.sql script (applied in production, since
+    removed) carry the "no cutoff" sentinel 1e9. MJD 1e9 is beyond datetime's
+    year range, so converting it used to 500 the export page and status
+    endpoint; both now render and simply omit the date."""
     from poi_broker import db
     from poi_broker.models import ExportTask, User
 

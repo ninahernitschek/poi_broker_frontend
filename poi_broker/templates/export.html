@@ -101,6 +101,7 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     exportBtn.addEventListener('click', function () {
+        if (exportBtn.disabled) return;
         let rules;
         try {
             rules = api.getRules();
@@ -192,7 +193,7 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     // Auto-refresh status if there's an active task
-    {% if recent_task and recent_task.status in ['PENDING', 'RUNNING'] %}
+    {% if recent_task and recent_task.is_active %}
     const refreshInterval = setInterval(function () {
         fetch('{{ url_for("export.export_status", task_id=recent_task.id) }}')
             .then(function (response) { return response.json(); })

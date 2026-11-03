@@ -9,16 +9,6 @@ from ..constants.features import FEATURE_COLUMN_LIST, default_feature_plot_colum
 logger = logging.getLogger(__name__)
 
 
-def get_available_features():
-    """
-    Return the list of available feature column names.
-    
-    Returns:
-        list: Feature column names (strings)
-    """
-    return FEATURE_COLUMN_LIST
-
-
 def query_features_by_alert_id(alert_id):
     """
     Query all features for a given alert_id.

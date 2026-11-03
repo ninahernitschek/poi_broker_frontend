@@ -64,6 +64,12 @@ class TestResolveSelectedObservatory:
         result = _resolve_selected_observatory(selected_meta, set(), custom_values)
         assert result is None
 
+    def test_custom_selection_boolean_id_returns_none(self):
+        selected_meta = {'source': 'custom', 'id': True}
+        custom_values = {'custom:1', 'custom:True'}
+        result = _resolve_selected_observatory(selected_meta, set(), custom_values)
+        assert result is None
+
     def test_builtin_selection_wrong_name_type_returns_none(self):
         """Builtin selection with non-str name should return None."""
         selected_meta = {'source': 'builtin', 'name': 123}

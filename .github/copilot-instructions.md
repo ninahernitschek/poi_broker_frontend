@@ -29,14 +29,14 @@ When proposing changes, refer to this structure:
 ## 4. Environment & Execution
 Always run these commands from the repo root to preserve relative imports and `.env` loading.
 - **Prerequisites:** `SECRET_KEY` must be set in `.env` or commands will raise a `RuntimeError`.
-- **Install:** `python -m pip install -r requirements.txt` and `python -m pip install -r requirementsdev.txt`
-- **Test:** `python -m pytest -q`
+- **Install:** `python -m pip install -r requirements.txt -r requirements-dev.txt`
+- **Test:** use focused test files while developing; full validation is `python -m pytest -n 2 -q --cov=poi_broker --cov-fail-under=75`. See `pre-commit.md` for commit hooks and CI triggers.
 - **Run (Dev Server):** `python -m flask --app wsgi:app run --debug`
 - **Validate (No Server):** `python -m flask --app wsgi:app routes` (Validates app import and blueprint registration).
 
 ## 5. Pre-Commit Validation Checklist
 Before finalizing a task, silently verify:
-1. Did I run `pytest -q`?
-2. Did I run `uvx ruff check --fix example.py` (apply linting/auto-fixes)?
-3. `python -m flask --app wsgi:app routes` with `SECRET_KEY` set
+1. Did I run the tests relevant to changed behavior? Use the full suite for broad/shared changes; documentation-only edits need lightweight checks.
+2. Did I run `python -m pre_commit run --all-files`? Hooks report correctness/configuration issues without rewriting files or running tests.
+3. For startup or blueprint changes, validate route registration with isolated test configuration; do not open production databases just to check imports.
 4. If UI/endpoint behavior changed, do a quick manual browser/API sanity check.

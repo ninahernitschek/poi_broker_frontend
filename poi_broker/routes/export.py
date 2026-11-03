@@ -39,7 +39,9 @@ def _env_int(name: str, default: int) -> int:
 # Maximum number of rows a single export may return. Larger exports are declined.
 MAX_EXPORT_ROWS = _env_int('EXPORT_MAX_ROWS', 1_000_000)
 
-# tools/apply_export_snapshot_mjd.sql backfills historical rows with the
+# Legacy export_task rows were backfilled by the one-shot
+# tools/apply_export_snapshot_mjd.sql script (applied in production, since
+# removed — see docs/adr/adr_db_schema_migration_strategy.md) with the
 # "no cutoff" sentinel 1e9 (far above any real alert MJD, ~6e4). MJD 1e9 is
 # ~year 2.7M, which astropy cannot convert to a datetime, so only real
 # cutoffs are ever rendered as dates.
@@ -108,14 +110,14 @@ def export_submit():
     # EXPORT_STALE_MAX_AGE_SECONDS (consumer down / no periodic tick), fail that
     # user's stale row and continue. Fresh PENDING/RUNNING still 409s.
     active_task = ExportTask.query.filter_by(user_id=current_user.id).filter(
-        ExportTask.status.in_(['PENDING', 'RUNNING'])
+        ExportTask.status.in_(ExportTask.ACTIVE_STATUSES)
     ).first()
 
     if active_task:
         reset_stale_export_tasks(user_id=current_user.id)
         db.session.expire(active_task)
         active_task = ExportTask.query.filter_by(user_id=current_user.id).filter(
-            ExportTask.status.in_(['PENDING', 'RUNNING'])
+            ExportTask.status.in_(ExportTask.ACTIVE_STATUSES)
         ).first()
 
     if active_task:

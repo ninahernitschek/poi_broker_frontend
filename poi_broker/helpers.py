@@ -28,7 +28,7 @@ def safe_serialize(obj):
 def serialize_fallback(obj):
     """Fallback handler to make the object serializable by converting binary data to string."""
     if isinstance(obj, bytes):
-        return obj.decode('utf-8')  # Convert binary to string
+        return obj.decode('utf-8', errors='replace')
     elif isinstance(obj, dict):
         return {k: serialize_fallback(v) for k, v in obj.items()}  # Keep dict as-is and process its values
     elif isinstance(obj, list):

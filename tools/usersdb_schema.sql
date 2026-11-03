@@ -1,4 +1,7 @@
 ---users.db---
+-- Fresh installations only. Never run against an existing database:
+-- existing deployments are migrated with one-shot apply_*.sql scripts
+-- (see docs/adr/adr_db_schema_migration_strategy.md).
 CREATE TABLE
     user (
         id INTEGER NOT NULL,

@@ -41,12 +41,15 @@ def init_huey(app):
     
     The actual Huey backend is configured via environment variables:
     - HUEY_BACKEND: 'memory' (default) or 'sqlite' for production
-    - HUEY_SQLITE_PATH: Path to huey.db (defaults to instance/huey.db)
+    - HUEY_SQLITE_PATH: Absolute path to huey.db. Required when HUEY_BACKEND=sqlite
+      (no app context exists at import time, so there is no instance-folder
+      fallback outside a request/app context). Must match the worker's path.
     - HUEY_IMMEDIATE: 'true' (default) or 'false' to run tasks async
     
     For production with background worker:
         1. Set HUEY_BACKEND=sqlite
-        2. Run the Huey consumer: python -m huey.bin.huey_consumer poi_broker.worker.huey
+        2. Set HUEY_SQLITE_PATH to an absolute path shared by web and worker
+        3. Run the Huey consumer: python -m huey.bin.huey_consumer poi_broker.worker.huey
     """
     from pathlib import Path
     
@@ -217,6 +220,12 @@ def create_app():
         # pre-change (second-granularity boundary — see
         # docs/password_reset/adr_session_invalidation.md).
         changed_at = user.password_changed_at
+        # New logins carry the exact revision of the credential they proved.
+        # Keep the timestamp fallback for sessions issued before this release.
+        if 'password_revision' in session:
+            revision = session['password_revision']
+            if type(revision) is not int or revision != (changed_at or 0):
+                return None
         if changed_at is not None:
             login_at = session.get('login_at')
             if not isinstance(login_at, int) or login_at <= changed_at:
@@ -236,9 +245,17 @@ def create_app():
 
     @app.context_processor
     def inject_template_globals():
+        # Deferred import: catalog_query binds `db` from this package, which
+        # is not defined yet at create_app-definition time.
+        from .services.catalog_query import PAGINATION_KEYS, VALID_PROB_CLASSES
+
         return {
             'app_version': app.config.get('APP_VERSION', ''),
             'current_year': datetime.now(timezone.utc).year,
+            # Canonical catalog URL-param / value lists for the page JS and
+            # templates so hand-maintained copies cannot drift (auditSBA F6/F15).
+            'pagination_keys': sorted(PAGINATION_KEYS),
+            'prob_classes': VALID_PROB_CLASSES,
         }
     
     @app.after_request
@@ -270,10 +287,55 @@ def create_app():
     # Global error handler for CSRF errors raised by Flask-WTF
     @app.errorhandler(CSRFError)
     def handle_csrf_error(error):
-        if request.path.startswith('/api/'):
+        if request.path.startswith('/api/') or request.is_json:
             return jsonify({'error': 'csrf validation failed', 'message': str(error)}), 400
         flash('Your form session expired or is invalid. Please reload this page and submit again. If this is a reset link, request a new one.', 'danger')
         return redirect(request.path)
+
+    # A client-supplied integer (path ID, ?page=, JSON field) larger than
+    # SQLite's INTEGER range raises OverflowError at bind time. That is a bad
+    # request, not a server fault — answer 400 instead of an HTML 500.
+    @app.errorhandler(OverflowError)
+    def handle_integer_overflow(error):
+        app.logger.exception('Integer out of range on %s: %s', request.path, error)
+        if request.path.startswith('/api/') or request.is_json:
+            return jsonify({'error': 'Numeric value out of range'}), 400
+        return 'Bad request: numeric value out of range.', 400
+
+    # Deeply nested JSON (query-builder rules) can exhaust the interpreter
+    # stack inside json.loads or the recursive rule validation. The payload is
+    # unparseable, so answer 400 instead of 500. A genuine server bug that
+    # overflows the stack is still visible in the log below.
+    @app.errorhandler(RecursionError)
+    def handle_recursion_error(error):
+        app.logger.exception(
+            'Recursion limit reached on %s (overly nested payload?): %s',
+            request.path,
+            error,
+        )
+        if request.path.startswith('/api/') or request.is_json:
+            return jsonify({'error': 'Request payload is too deeply nested'}), 400
+        return 'Bad request: payload is too deeply nested.', 400
+
+    # MAX_CONTENT_LENGTH exceeded. JSON API paths get a JSON answer; the
+    # default Werkzeug page would be HTML.
+    @app.errorhandler(413)
+    def handle_request_too_large(error):
+        if request.path.startswith('/api/') or request.is_json:
+            return jsonify({'error': 'Request body too large'}), 413
+        return 'Request body too large.', 413
+
+    from .services.catalog_list import MalformedCursor
+
+    # Client-supplied keyset cursor that fails validation (e.g. non-numeric
+    # value for a numeric sort column). That is a bad request, not a server
+    # fault — answer 400 instead of an unhandled HTML 500.
+    @app.errorhandler(MalformedCursor)
+    def handle_malformed_cursor(error):
+        app.logger.warning('Malformed cursor on %s: %s', request.path, error)
+        if request.path.startswith('/api/') or request.is_json:
+            return jsonify({'error': 'Invalid cursor'}), 400
+        return 'Bad request: the pagination cursor could not be parsed.', 400
 
     from .cli import register_cli
     register_cli(app)

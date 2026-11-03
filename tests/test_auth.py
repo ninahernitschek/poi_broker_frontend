@@ -238,7 +238,8 @@ def test_login_renders_info_flash_category(client, monkeypatch):
 
 def test_forgot_password_post_generates_reset_token_and_emails_user(client, app, monkeypatch, user_factory):
     user_factory(email='reset@example.com', verified=True)
-    monkeypatch.setattr(auth_module, 'send_email', lambda *args, **kwargs: True)
+    sent = []
+    monkeypatch.setattr(auth_module, 'send_email', lambda *args, **kwargs: sent.append((args, kwargs)) or True)
 
     response = client.post(
         '/forgot-password',
@@ -252,9 +253,12 @@ def test_forgot_password_post_generates_reset_token_and_emails_user(client, app,
 
     with app.app_context():
         user = User.query.filter_by(email='reset@example.com').first()
-        assert user.reset_token is not None
-        assert user.reset_token_expires is not None
-        assert user.reset_token_expires > int(datetime.now(timezone.utc).timestamp())
+        assert user.reset_token is None
+        assert user.reset_token_expires is None
+        assert user.password_changed_at is None
+    assert len(sent) == 1
+    assert '/reset-password/v1.' in sent[0][0][0]
+    assert sent[0][1]['expire_time'] > int(datetime.now(timezone.utc).timestamp())
 
 
 def test_forgot_password_post_unknown_email_uses_same_notice(client):
@@ -353,3 +357,15 @@ def test_is_reset_token_expired_and_format_expire_time():
 
     future = datetime.now(timezone.utc) + timedelta(hours=1)
     assert auth_module._is_reset_token_expired(future) is False
+
+
+def test_verify_email_rate_limit_is_env_configurable(tmp_path, monkeypatch):
+    from poi_broker.settings import build_app_config
+
+    monkeypatch.setenv('SECRET_KEY', 'settings-secret')
+    monkeypatch.setenv('ALERTS_DB_PATH', str(tmp_path / 'alerts.db'))
+    monkeypatch.setenv('USERS_DB_PATH', str(tmp_path / 'users.db'))
+    monkeypatch.setenv('AUTH_RATE_LIMIT_VERIFY_EMAIL', '3 per hour')
+
+    config, _, _ = build_app_config(tmp_path)
+    assert config['AUTH_RATE_LIMIT_VERIFY_EMAIL'] == '3 per hour'

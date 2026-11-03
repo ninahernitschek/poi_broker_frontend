@@ -1,5 +1,7 @@
 -- CLI: sqlite3 /path/to/alerts.db .schema
 -- Query: SELECT sql FROM sqlite_master WHERE sql IS NOT NULL;
+-- Fresh installations only. Never run against an existing database
+-- (see docs/adr/adr_db_schema_migration_strategy.md).
 
 ---alerts.db---
 CREATE TABLE
@@ -284,14 +286,26 @@ CREATE TABLE
         harmonics_chi_per_degree_i real,
         PRIMARY KEY (alert_id, locus_id, date_alert_mjd)
     );
-CREATE INDEX IF NOT EXISTS idx_featuretable_date_alert_mjd ON featuretable (date_alert_mjd);
+-- Sort indexes are (column, alert_id, locus_id): the catalog pages with a keyset
+-- cursor over that triple, and the composite serves the ORDER BY with no temp
+-- b-tree (first page of any sort: 2.2 s without, 0.000 s with, on 3.18M rows).
+-- Each composite's leftmost prefix is the bare column, so it also covers that
+-- column's equality/range filters. alert_id needs none: the PK autoindex is
+-- already (alert_id, locus_id, date_alert_mjd). ant_passband is filter-only.
 CREATE INDEX IF NOT EXISTS idx_featuretable_alert_id ON featuretable (alert_id);
-CREATE INDEX IF NOT EXISTS idx_featuretable_ztf_object_id ON featuretable (ztf_object_id);
-CREATE INDEX IF NOT EXISTS idx_featuretable_locus_id ON featuretable (locus_id);
 CREATE INDEX IF NOT EXISTS idx_featuretable_ant_passband ON featuretable (ant_passband);
-CREATE INDEX IF NOT EXISTS idx_featuretable_locus_ra ON featuretable (locus_ra);
-CREATE INDEX IF NOT EXISTS idx_featuretable_locus_dec ON featuretable (locus_dec);
-CREATE INDEX IF NOT EXISTS idx_featuretable_ant_mag_corrected ON featuretable (ant_mag_corrected);
+CREATE INDEX IF NOT EXISTS idx_featuretable_sort_date_alert_mjd
+    ON featuretable (date_alert_mjd, alert_id, locus_id);
+CREATE INDEX IF NOT EXISTS idx_featuretable_sort_ztf_object_id
+    ON featuretable (ztf_object_id, alert_id, locus_id);
+CREATE INDEX IF NOT EXISTS idx_featuretable_sort_locus_id
+    ON featuretable (locus_id, alert_id, locus_id);
+CREATE INDEX IF NOT EXISTS idx_featuretable_sort_locus_ra
+    ON featuretable (locus_ra, alert_id, locus_id);
+CREATE INDEX IF NOT EXISTS idx_featuretable_sort_locus_dec
+    ON featuretable (locus_dec, alert_id, locus_id);
+CREATE INDEX IF NOT EXISTS idx_featuretable_sort_ant_mag_corrected
+    ON featuretable (ant_mag_corrected, alert_id, locus_id);
 
 CREATE TABLE
     crossmatches (

@@ -83,12 +83,28 @@ class InputParser:
         if not matches or not self._tokens_cover_text(matches, text):
             return ParseResult(values=[])
 
+        values = []
+        for m in matches[:2]:
+            value = m.replace('>', '').replace('<', '')
+            if not self._iso_value_is_valid(value):
+                return ParseResult(values=[])
+            values.append(ParsedValue(raw=m, operator=self._extract_operator(m), value=value))
         has_time = any(self._TIME_COMPONENT_PATTERN.search(m) for m in matches)
-        values = [
-            ParsedValue(raw=m, operator=self._extract_operator(m), value=m.replace('>', '').replace('<', ''))
-            for m in matches[:2]
-        ]
         return ParseResult(values=values, has_time_component=has_time)
+
+    @staticmethod
+    def _iso_value_is_valid(value: str) -> bool:
+        """True when an ISO token is a real calendar date (and time, if present)."""
+        try:
+            if 'T' in value:
+                datetime.strptime(value, '%Y-%m-%dT%H:%M:%S')
+            elif ' ' in value:
+                datetime.strptime(value, '%Y-%m-%d %H:%M:%S')
+            else:
+                datetime.strptime(value, '%Y-%m-%d')
+        except ValueError:
+            return False
+        return True
 
     @staticmethod
     def _tokens_cover_text(matches: List[str], text: str) -> bool:

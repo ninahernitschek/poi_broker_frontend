@@ -1,0 +1,394 @@
+{
+  "database_bytes": 9434943488,
+  "sqlite": "3.49.1",
+  "note": "Cold application metadata caches; OS disk cache is uncontrolled.",
+  "requests": [
+    {
+      "label": "after: first, cold metadata",
+      "url": "/?ant_passband=g&sort__ant_mag_corrected=asc",
+      "seconds": 0.1178,
+      "status": 200,
+      "rows_label": "100+",
+      "sql_statements": 2,
+      "aggregate_sql": 0
+    },
+    {
+      "label": "after: next, cold metadata",
+      "url": "/?ant_passband=g&sort__ant_mag_corrected=asc&before_alert_id=ztf_candidate%3A2749373291915015048&before_locus_id=ANT2020agey2&before_v=11.30118246796794",
+      "seconds": 0.0664,
+      "status": 200,
+      "rows_label": "100+",
+      "sql_statements": 2,
+      "aggregate_sql": 0
+    },
+    {
+      "label": "after: last, cold metadata",
+      "url": "/?ant_passband=g&sort__ant_mag_corrected=asc&last=1",
+      "seconds": 0.0146,
+      "status": 200,
+      "rows_label": "100+",
+      "sql_statements": 1,
+      "aggregate_sql": 0
+    },
+    {
+      "label": "after: missing values, cold metadata",
+      "url": "/?ant_passband=g&sort__ant_mag_corrected=asc&nulls=1",
+      "seconds": 0.014,
+      "status": 200,
+      "rows_label": "100+",
+      "sql_statements": 2,
+      "aggregate_sql": 0
+    },
+    {
+      "label": "after: numbered page 2, cold metadata",
+      "url": "/?ant_passband=g&sort__ant_mag_corrected=asc&page=2",
+      "seconds": 0.0125,
+      "status": 200,
+      "rows_label": "100+",
+      "sql_statements": 2,
+      "aggregate_sql": 0
+    },
+    {
+      "label": "after: default, cold metadata",
+      "url": "/",
+      "seconds": 0.3628,
+      "status": 200,
+      "rows_label": "3178670",
+      "sql_statements": 2,
+      "aggregate_sql": 1
+    },
+    {
+      "label": "after: optional count",
+      "url": "/api/catalog-count?ant_passband=g",
+      "seconds": 2.0163,
+      "status": 422,
+      "rows_label": null,
+      "sql_statements": 1,
+      "aggregate_sql": 1
+    },
+    {
+      "label": "after: repeated optional count",
+      "status": 422,
+      "seconds": 0.0018
+    },
+    {
+      "label": "after: first, trial 2, cold metadata",
+      "url": "/?ant_passband=g&sort__ant_mag_corrected=asc",
+      "seconds": 0.0164,
+      "status": 200,
+      "rows_label": "100+",
+      "sql_statements": 2,
+      "aggregate_sql": 0
+    },
+    {
+      "label": "after: last, trial 2, cold metadata",
+      "url": "/?ant_passband=g&sort__ant_mag_corrected=asc&last=1",
+      "seconds": 0.0104,
+      "status": 200,
+      "rows_label": "100+",
+      "sql_statements": 1,
+      "aggregate_sql": 0
+    },
+    {
+      "label": "after: missing values, trial 2, cold metadata",
+      "url": "/?ant_passband=g&sort__ant_mag_corrected=asc&nulls=1",
+      "seconds": 0.0123,
+      "status": 200,
+      "rows_label": "100+",
+      "sql_statements": 2,
+      "aggregate_sql": 0
+    },
+    {
+      "label": "after: numbered page 2, trial 2, cold metadata",
+      "url": "/?ant_passband=g&sort__ant_mag_corrected=asc&page=2",
+      "seconds": 0.0112,
+      "status": 200,
+      "rows_label": "100+",
+      "sql_statements": 2,
+      "aggregate_sql": 0
+    },
+    {
+      "label": "after: default, trial 2, cold metadata",
+      "url": "/",
+      "seconds": 0.0113,
+      "status": 200,
+      "rows_label": "3178670",
+      "sql_statements": 2,
+      "aggregate_sql": 1
+    },
+    {
+      "label": "after: first, trial 3, cold metadata",
+      "url": "/?ant_passband=g&sort__ant_mag_corrected=asc",
+      "seconds": 0.0085,
+      "status": 200,
+      "rows_label": "100+",
+      "sql_statements": 2,
+      "aggregate_sql": 0
+    },
+    {
+      "label": "after: last, trial 3, cold metadata",
+      "url": "/?ant_passband=g&sort__ant_mag_corrected=asc&last=1",
+      "seconds": 0.0109,
+      "status": 200,
+      "rows_label": "100+",
+      "sql_statements": 1,
+      "aggregate_sql": 0
+    },
+    {
+      "label": "after: missing values, trial 3, cold metadata",
+      "url": "/?ant_passband=g&sort__ant_mag_corrected=asc&nulls=1",
+      "seconds": 0.0093,
+      "status": 200,
+      "rows_label": "100+",
+      "sql_statements": 2,
+      "aggregate_sql": 0
+    },
+    {
+      "label": "after: numbered page 2, trial 3, cold metadata",
+      "url": "/?ant_passband=g&sort__ant_mag_corrected=asc&page=2",
+      "seconds": 0.0127,
+      "status": 200,
+      "rows_label": "100+",
+      "sql_statements": 2,
+      "aggregate_sql": 0
+    },
+    {
+      "label": "after: default, trial 3, cold metadata",
+      "url": "/",
+      "seconds": 0.0302,
+      "status": 200,
+      "rows_label": "3178670",
+      "sql_statements": 2,
+      "aggregate_sql": 1
+    }
+  ],
+  "comparison_ref": "HEAD (only previous start and resolve_catalog_total functions; current template)",
+  "before": [
+    {
+      "label": "before: first, cold metadata",
+      "url": "/?ant_passband=g&sort__ant_mag_corrected=asc",
+      "seconds": 45.0017,
+      "error": "OperationalError",
+      "budget_exceeded": true
+    }
+  ],
+  "nullable_sort_matrix": [
+    {
+      "label": "matrix: ant_mag_corrected asc",
+      "url": "/?ant_passband=g&sort__ant_mag_corrected=asc",
+      "seconds": 0.0136,
+      "status": 200,
+      "rows_label": "100+",
+      "sql_statements": 2,
+      "aggregate_sql": 0
+    },
+    {
+      "label": "matrix: ant_mag_corrected asc&last=1",
+      "url": "/?ant_passband=g&sort__ant_mag_corrected=asc&last=1",
+      "seconds": 0.0084,
+      "status": 200,
+      "rows_label": "100+",
+      "sql_statements": 1,
+      "aggregate_sql": 0
+    },
+    {
+      "label": "matrix: ant_mag_corrected asc&nulls=1",
+      "url": "/?ant_passband=g&sort__ant_mag_corrected=asc&nulls=1",
+      "seconds": 0.0098,
+      "status": 200,
+      "rows_label": "100+",
+      "sql_statements": 2,
+      "aggregate_sql": 0
+    },
+    {
+      "label": "matrix: ant_mag_corrected desc",
+      "url": "/?ant_passband=g&sort__ant_mag_corrected=desc",
+      "seconds": 0.2338,
+      "status": 200,
+      "rows_label": "100+",
+      "sql_statements": 2,
+      "aggregate_sql": 0
+    },
+    {
+      "label": "matrix: ant_mag_corrected desc&last=1",
+      "url": "/?ant_passband=g&sort__ant_mag_corrected=desc&last=1",
+      "seconds": 0.0087,
+      "status": 200,
+      "rows_label": "100+",
+      "sql_statements": 1,
+      "aggregate_sql": 0
+    },
+    {
+      "label": "matrix: ant_mag_corrected desc&nulls=1",
+      "url": "/?ant_passband=g&sort__ant_mag_corrected=desc&nulls=1",
+      "seconds": 0.0088,
+      "status": 200,
+      "rows_label": "100+",
+      "sql_statements": 2,
+      "aggregate_sql": 0
+    },
+    {
+      "label": "matrix: ztf_object_id asc",
+      "url": "/?ant_passband=g&sort__ztf_object_id=asc",
+      "seconds": 0.2403,
+      "status": 200,
+      "rows_label": "100+",
+      "sql_statements": 2,
+      "aggregate_sql": 0
+    },
+    {
+      "label": "matrix: ztf_object_id asc&last=1",
+      "url": "/?ant_passband=g&sort__ztf_object_id=asc&last=1",
+      "seconds": 0.2618,
+      "status": 200,
+      "rows_label": "100+",
+      "sql_statements": 3,
+      "aggregate_sql": 0
+    },
+    {
+      "label": "matrix: ztf_object_id asc&nulls=1",
+      "url": "/?ant_passband=g&sort__ztf_object_id=asc&nulls=1",
+      "seconds": 0.0037,
+      "status": 404,
+      "rows_label": null,
+      "sql_statements": 1,
+      "aggregate_sql": 0
+    },
+    {
+      "label": "matrix: ztf_object_id desc",
+      "url": "/?ant_passband=g&sort__ztf_object_id=desc",
+      "seconds": 0.0134,
+      "status": 200,
+      "rows_label": "100+",
+      "sql_statements": 2,
+      "aggregate_sql": 0
+    },
+    {
+      "label": "matrix: ztf_object_id desc&last=1",
+      "url": "/?ant_passband=g&sort__ztf_object_id=desc&last=1",
+      "seconds": 0.0127,
+      "status": 200,
+      "rows_label": "100+",
+      "sql_statements": 3,
+      "aggregate_sql": 0
+    },
+    {
+      "label": "matrix: ztf_object_id desc&nulls=1",
+      "url": "/?ant_passband=g&sort__ztf_object_id=desc&nulls=1",
+      "seconds": 0.0026,
+      "status": 404,
+      "rows_label": null,
+      "sql_statements": 1,
+      "aggregate_sql": 0
+    },
+    {
+      "label": "matrix: locus_ra asc",
+      "url": "/?ant_passband=g&sort__locus_ra=asc",
+      "seconds": 0.1988,
+      "status": 200,
+      "rows_label": "100+",
+      "sql_statements": 2,
+      "aggregate_sql": 0
+    },
+    {
+      "label": "matrix: locus_ra asc&last=1",
+      "url": "/?ant_passband=g&sort__locus_ra=asc&last=1",
+      "seconds": 0.2104,
+      "status": 200,
+      "rows_label": "100+",
+      "sql_statements": 3,
+      "aggregate_sql": 0
+    },
+    {
+      "label": "matrix: locus_ra asc&nulls=1",
+      "url": "/?ant_passband=g&sort__locus_ra=asc&nulls=1",
+      "seconds": 0.0042,
+      "status": 404,
+      "rows_label": null,
+      "sql_statements": 1,
+      "aggregate_sql": 0
+    },
+    {
+      "label": "matrix: locus_ra desc",
+      "url": "/?ant_passband=g&sort__locus_ra=desc",
+      "seconds": 0.0139,
+      "status": 200,
+      "rows_label": "100+",
+      "sql_statements": 2,
+      "aggregate_sql": 0
+    },
+    {
+      "label": "matrix: locus_ra desc&last=1",
+      "url": "/?ant_passband=g&sort__locus_ra=desc&last=1",
+      "seconds": 0.0134,
+      "status": 200,
+      "rows_label": "100+",
+      "sql_statements": 3,
+      "aggregate_sql": 0
+    },
+    {
+      "label": "matrix: locus_ra desc&nulls=1",
+      "url": "/?ant_passband=g&sort__locus_ra=desc&nulls=1",
+      "seconds": 0.0028,
+      "status": 404,
+      "rows_label": null,
+      "sql_statements": 1,
+      "aggregate_sql": 0
+    },
+    {
+      "label": "matrix: locus_dec asc",
+      "url": "/?ant_passband=g&sort__locus_dec=asc",
+      "seconds": 0.1394,
+      "status": 200,
+      "rows_label": "100+",
+      "sql_statements": 2,
+      "aggregate_sql": 0
+    },
+    {
+      "label": "matrix: locus_dec asc&last=1",
+      "url": "/?ant_passband=g&sort__locus_dec=asc&last=1",
+      "seconds": 0.1657,
+      "status": 200,
+      "rows_label": "100+",
+      "sql_statements": 3,
+      "aggregate_sql": 0
+    },
+    {
+      "label": "matrix: locus_dec asc&nulls=1",
+      "url": "/?ant_passband=g&sort__locus_dec=asc&nulls=1",
+      "seconds": 0.0026,
+      "status": 404,
+      "rows_label": null,
+      "sql_statements": 1,
+      "aggregate_sql": 0
+    },
+    {
+      "label": "matrix: locus_dec desc",
+      "url": "/?ant_passband=g&sort__locus_dec=desc",
+      "seconds": 0.008,
+      "status": 200,
+      "rows_label": "100+",
+      "sql_statements": 2,
+      "aggregate_sql": 0
+    },
+    {
+      "label": "matrix: locus_dec desc&last=1",
+      "url": "/?ant_passband=g&sort__locus_dec=desc&last=1",
+      "seconds": 0.008,
+      "status": 200,
+      "rows_label": "100+",
+      "sql_statements": 3,
+      "aggregate_sql": 0
+    },
+    {
+      "label": "matrix: locus_dec desc&nulls=1",
+      "url": "/?ant_passband=g&sort__locus_dec=desc&nulls=1",
+      "seconds": 0.0024,
+      "status": 404,
+      "rows_label": null,
+      "sql_statements": 1,
+      "aggregate_sql": 0
+    }
+  ],
+  "runtime": "Windows, Python 3.12.10, SQLite 3.49.1, SQLAlchemy 2.0.48"
+}

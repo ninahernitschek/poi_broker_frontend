@@ -4,6 +4,27 @@ from astropy import units as u
 from astropy.coordinates import EarthLocation
 
 
+def test_timezone_finder_accessor_is_cached(monkeypatch):
+    import poi_broker.observing_tool as observing_tool
+
+    observing_tool._get_timezone_finder.cache_clear()
+    constructed = []
+
+    class FakeTimezoneFinder:
+        def __init__(self):
+            constructed.append(self)
+
+    monkeypatch.setattr(observing_tool, 'TimezoneFinder', FakeTimezoneFinder)
+
+    first = observing_tool._get_timezone_finder()
+    second = observing_tool._get_timezone_finder()
+
+    assert first is second
+    assert constructed == [first]
+
+    observing_tool._get_timezone_finder.cache_clear()
+
+
 def test_query_observing_plot_requires_all_parameters(client):
     response = client.get('/query_observing_plot')
 
@@ -25,6 +46,38 @@ def test_query_observing_plot_rejects_invalid_parameter_format(client):
 
     assert response.status_code == 400
     assert 'Invalid parameter format' in response.get_data(as_text=True)
+
+
+def test_query_observing_plot_rejects_non_calendar_date_with_numeric_coords(client):
+    response = client.get(
+        '/query_observing_plot',
+        query_string={
+            'obs_loc': 'Palomar',
+            'obs_date': 'not-a-date',
+            'obs_tz': 'option_utc',
+            'ra': '10',
+            'dec': '20',
+        },
+    )
+    assert response.status_code == 400
+    assert response.is_json
+    assert 'Invalid parameter format' in response.get_json().get('error', '')
+
+
+def test_query_observing_plot_rejects_impossible_calendar_date(client):
+    response = client.get(
+        '/query_observing_plot',
+        query_string={
+            'obs_loc': 'Palomar',
+            'obs_date': '2024-99-99',
+            'obs_tz': 'option_utc',
+            'ra': '10',
+            'dec': '20',
+        },
+    )
+    assert response.status_code == 400
+    assert response.is_json
+    assert 'Invalid parameter format' in response.get_json().get('error', '')
 
 
 def test_query_observing_plot_not_visible_returns_message(client, monkeypatch):
@@ -220,3 +273,31 @@ def test_query_observing_plot_builtin_valid_iana_resolution_failure_logs_diagnos
     assert 'Failed to resolve timezone via ZoneInfo' in logs
     assert 'America/Santiago' in logs
     assert 'simulated zoneinfo resolution failure' in logs
+
+
+@pytest.mark.slow
+def test_query_observing_plot_polar_summer_returns_moon_message(client, monkeypatch):
+    """Midnight-sun dates have no night samples; must not 500 on empty np.max."""
+    import poi_broker.observing_tool as observing_tool
+    from datetime import timezone
+
+    location = EarthLocation(lat=78.0 * u.deg, lon=16.0 * u.deg, height=10 * u.m)
+    monkeypatch.setattr(observing_tool.EarthLocation, 'of_site', lambda site_name: location)
+    monkeypatch.setattr(observing_tool.TimezoneFinder, 'timezone_at', lambda self, lng, lat: 'UTC')
+    monkeypatch.setattr(observing_tool, 'ZoneInfo', lambda tz_name: timezone.utc)
+
+    response = client.get(
+        '/query_observing_plot',
+        query_string={
+            'obs_loc': 'NyAlesund',
+            'obs_date': '2025-06-21',
+            'obs_tz': 'option_utc',
+            'ra': '101.28715533',
+            'dec': '70',
+        },
+    )
+    payload = response.get_json()
+    assert response.status_code == 200, response.get_data(as_text=True)
+    assert 'error' not in payload
+    assert payload['image'].startswith('data:image/png;base64,')
+    assert payload.get('moonMessage') == 'No nighttime hours on this date'

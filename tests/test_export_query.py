@@ -73,6 +73,12 @@ def _seed_export_rows() -> None:
     db.session.commit()
 
 
+def test_get_export_columns_is_cached():
+    # Called once per exported row (up to MAX_EXPORT_ROWS); the cached list
+    # must be the same object every time.
+    assert get_export_columns() is get_export_columns()
+
+
 def test_export_query_selects_columns_not_full_classification(app):
     with app.app_context():
         _seed_export_rows()

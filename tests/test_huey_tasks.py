@@ -423,6 +423,94 @@ def test_export_task_status_transitions(app):
         db.session.commit()
 
 
+def test_sequential_same_second_exports_keep_separate_files(app, tmp_path, monkeypatch):
+    """The active-task slot is released before the next export starts."""
+    import csv
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    import poi_broker.tasks as tasks_mod
+    from poi_broker import db
+    from poi_broker.models import ExportTask, User, Ztf
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 10, 11, 12, 0, 0, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(tasks_mod, 'datetime', FixedDatetime)
+    monkeypatch.setattr(tasks_mod, '_get_worker_app', lambda: app)
+    monkeypatch.setattr(app, 'instance_path', str(tmp_path / 'instance'))
+
+    with app.app_context():
+        user = User(email='same-second@example.com', password='hashed', email_verified=True)
+        db.session.add(user)
+        db.session.add_all([
+            Ztf(alert_id='export-first', locus_id='L-first', date_alert_mjd=60001.0),
+            Ztf(alert_id='export-second', locus_id='L-second', date_alert_mjd=60002.0),
+        ])
+        db.session.commit()
+        user_id = user.id
+
+    paths = []
+    for alert_id in ('export-first', 'export-second'):
+        with app.app_context():
+            task = ExportTask(user_id=user_id, status='PENDING', snapshot_mjd=70000.0)
+            db.session.add(task)
+            db.session.commit()
+            task_id = task.id
+        rules = {'condition': 'AND', 'rules': [
+            {'field': 'featuretable.alert_id', 'operator': 'equal', 'value': alert_id},
+        ]}
+        tasks_mod.create_export_file.call_local(rules, user_id, task_id)
+        with app.app_context():
+            task = db.session.get(ExportTask, task_id)
+            assert task.status == 'SUCCESS'
+            paths.append(Path(task.file_path))
+
+    assert paths[0] != paths[1]
+    for path, expected_alert in zip(paths, ('export-first', 'export-second')):
+        with path.open(newline='', encoding='utf-8') as csv_file:
+            assert [row['alert_id'] for row in csv.DictReader(csv_file)] == [expected_alert]
+
+
+class _StubSession:
+    """Scoped session stub for unit-testing Huey export task execution seams."""
+
+    def __init__(self, task=None, pk_expected: int = 42):
+        self.task = task
+        self.pk_expected = pk_expected
+
+    def get(self, model, pk, *a, **kw):
+        from poi_broker.models import ExportTask
+
+        if model is ExportTask and pk == self.pk_expected:
+            return self.task
+        return None
+
+    def commit(self, *a, **kw):
+        return None
+
+    def rollback(self, *a, **kw):
+        return None
+
+    def remove(self):
+        return None
+
+
+def _failing_export_build(*_a, **_kw):
+    """Scaffolding for tests asserting failure handling during the CSV row-writing loop."""
+    def _boom_iter():
+        raise RuntimeError('simulated write failure')
+        yield  # pragma: no cover -- makes this a generator so iteration raises
+
+    class _BoomQuery:
+        def yield_per(self, _n):
+            return iter(_boom_iter())
+
+    return _BoomQuery(), 'fake where'
+
+
 def test_create_export_file_cleans_partial_file_on_failure(app, monkeypatch):
     """Regression (#5): a mid-write failure removes the partial CSV file and
     marks the ExportTask FAILED instead of leaving an orphan file on disk.
@@ -447,23 +535,7 @@ def test_create_export_file_cleans_partial_file_on_failure(app, monkeypatch):
     #   1. db.session.get -> return fake_task (the task's initial row lookup).
     #   2. _transition_export_task -> mutate fake_task directly (all status
     #      writes go through this single function).
-    class _StubSession:
-        def get(self, model, pk, *a, **kw):
-            if model is ExportTask and pk == 42:
-                return fake_task
-            return None
-
-        def commit(self, *a, **kw):
-            return None
-
-        def rollback(self, *a, **kw):
-            return None
-
-        # Fixture teardown calls db.session.remove(); stub it harmlessly.
-        def remove(self):
-            return None
-
-    monkeypatch.setattr(tasks_mod.db, 'session', _StubSession())
+    monkeypatch.setattr(tasks_mod.db, 'session', _StubSession(fake_task))
 
     def _fake_transition(task_id, from_statuses, **values):
         if task_id != 42:
@@ -480,18 +552,7 @@ def test_create_export_file_cleans_partial_file_on_failure(app, monkeypatch):
     # inside the CSV-write loop (after the file is opened and the header
     # written) — exactly the "disk full / row serialization" scenario. The
     # task's error handler must unlink the partial file.
-    def _boom_iter():
-        raise RuntimeError('simulated write failure')
-        yield  # pragma: no cover -- makes this a generator so iteration raises
-
-    class _BoomQuery:
-        def yield_per(self, _n):
-            return iter(_boom_iter())
-
-    def _fake_build(*_a, **_kw):
-        return _BoomQuery(), 'fake where'
-
-    monkeypatch.setattr(tasks_mod, 'build_export_query_from_rules', _fake_build)
+    monkeypatch.setattr(tasks_mod, 'build_export_query_from_rules', _failing_export_build)
     # The task builds its own app via create_app(); use the fixture app so the
     # patched session_factory applies inside the task's new app context.
     monkeypatch.setattr(tasks_mod, 'create_app', lambda: app)
@@ -520,6 +581,147 @@ def test_create_export_file_cleans_partial_file_on_failure(app, monkeypatch):
     # No NEW partial CSV may be left behind by the failed task.
     after = {p.name for p in exports_dir.iterdir()}
     assert after == before, f'failed task left a partial file: {after - before}'
+
+
+def test_create_export_file_persists_file_path_even_on_failure(app, monkeypatch):
+    """Regression (auditSBA F18): file_path is persisted to the task row as
+    soon as the output file is created, BEFORE the row loop runs.
+
+    A worker hard-killed mid-write cannot run the exception handler, so the
+    row is only marked FAILED later by reset_stale_export_tasks. If file_path
+    were only persisted on SUCCESS (the old behavior), that FAILED row would
+    have a NULL path and cleanup_expired_exports could never reclaim the
+    partial CSV.
+    """
+    from pathlib import Path
+
+    import poi_broker.tasks as tasks_mod
+    from poi_broker.models import ExportTask
+
+    fake_task = ExportTask(user_id=1, status='RUNNING')
+
+    monkeypatch.setattr(tasks_mod.db, 'session', _StubSession(fake_task))
+
+    def _fake_transition(task_id, from_statuses, **values):
+        if task_id != 42:
+            return False
+        if fake_task.status not in from_statuses:
+            return False
+        for k, v in values.items():
+            setattr(fake_task, k, v)
+        return True
+
+    monkeypatch.setattr(tasks_mod, '_transition_export_task', _fake_transition)
+    monkeypatch.setattr(tasks_mod, 'build_export_query_from_rules', _failing_export_build)
+    monkeypatch.setattr(tasks_mod, 'create_app', lambda: app)
+
+    exports_dir = Path(app.instance_path) / 'exports'
+    exports_dir.mkdir(parents=True, exist_ok=True)
+    before = {p.name for p in exports_dir.iterdir()}
+
+    tasks_mod.create_export_file.func(
+        query_params={'rules': [{'x': 1}]}, user_id=1, task_id=42,
+    )
+
+    assert fake_task.status == 'FAILED'
+    # The path must be recorded on the row even though the write failed.
+    assert fake_task.file_path is not None
+    assert fake_task.file_path.endswith('.csv')
+    after = {p.name for p in exports_dir.iterdir()}
+    assert after == before, f'failed task left a partial file: {after - before}'
+
+
+def test_cleanup_expired_exports_reclaims_success_task(app):
+    """Expired SUCCESS exports are removed: CSV file first, then the row."""
+    from datetime import timedelta
+    from pathlib import Path
+
+    from poi_broker import db
+    from poi_broker.models import ExportTask, User
+    from poi_broker.tasks import cleanup_expired_exports
+
+    with app.app_context():
+        ExportTask.query.delete()
+        User.query.filter_by(email='cleanup-success@example.com').delete()
+        db.session.commit()
+
+        user = User(
+            email='cleanup-success@example.com',
+            password='hashed',
+            name='Cleanup Success',
+            email_verified=True,
+        )
+        db.session.add(user)
+        db.session.commit()
+
+        exports_dir = Path(app.instance_path) / 'exports'
+        exports_dir.mkdir(parents=True, exist_ok=True)
+        csv_file = exports_dir / 'export_cleanup_success_test.csv'
+        csv_file.write_text('alert_id\nx\n', encoding='utf-8')
+
+        task = ExportTask(user_id=user.id, status='SUCCESS', file_path=str(csv_file))
+        task.created_at = datetime.now(timezone.utc) - timedelta(days=11)
+        db.session.add(task)
+        db.session.commit()
+        task_id = task.id
+
+        removed = cleanup_expired_exports()
+
+        assert removed == 1
+        assert not csv_file.exists()
+        assert db.session.get(ExportTask, task_id) is None
+
+        ExportTask.query.delete()
+        User.query.delete()
+        db.session.commit()
+
+
+def test_cleanup_expired_exports_reclaims_failed_task_with_file(app):
+    """Regression (auditSBA F18): FAILED rows that carry a file_path (worker
+    killed mid-write, then reset by the stale guard) are cleaned up too —
+    previously only status == 'SUCCESS' was selected, so the partial CSV
+    referenced by a FAILED row was never reclaimed."""
+    from datetime import timedelta
+    from pathlib import Path
+
+    from poi_broker import db
+    from poi_broker.models import ExportTask, User
+    from poi_broker.tasks import cleanup_expired_exports
+
+    with app.app_context():
+        ExportTask.query.delete()
+        User.query.filter_by(email='cleanup-failed@example.com').delete()
+        db.session.commit()
+
+        user = User(
+            email='cleanup-failed@example.com',
+            password='hashed',
+            name='Cleanup Failed',
+            email_verified=True,
+        )
+        db.session.add(user)
+        db.session.commit()
+
+        exports_dir = Path(app.instance_path) / 'exports'
+        exports_dir.mkdir(parents=True, exist_ok=True)
+        csv_file = exports_dir / 'export_cleanup_failed_test.csv'
+        csv_file.write_text('alert_id\npartial-row\n', encoding='utf-8')
+
+        task = ExportTask(user_id=user.id, status='FAILED', file_path=str(csv_file))
+        task.created_at = datetime.now(timezone.utc) - timedelta(days=11)
+        db.session.add(task)
+        db.session.commit()
+        task_id = task.id
+
+        removed = cleanup_expired_exports()
+
+        assert removed == 1
+        assert not csv_file.exists()
+        assert db.session.get(ExportTask, task_id) is None
+
+        ExportTask.query.delete()
+        User.query.delete()
+        db.session.commit()
 
 
 def test_transition_export_task_retries_lock_once(app, monkeypatch):
@@ -661,7 +863,7 @@ def test_transition_export_task_cas_miss_returns_false(app):
 
 
 def test_create_export_file_heartbeat_continues_on_lock(app, monkeypatch):
-    """Heartbeat lock must not abort mid-write or unlink the CSV."""
+    """Heartbeat and pre-write file_path persist must not abort on a locked DB."""
     import sqlite3
     from pathlib import Path
 
@@ -670,24 +872,10 @@ def test_create_export_file_heartbeat_continues_on_lock(app, monkeypatch):
 
     fake_task = ExportTask(user_id=1, status='PENDING')
 
-    class _StubSession:
-        def get(self, model, pk, *a, **kw):
-            if model is ExportTask and pk == 42:
-                return fake_task
-            return None
-
-        def commit(self, *a, **kw):
-            return None
-
-        def rollback(self, *a, **kw):
-            return None
-
-        def remove(self):
-            return None
-
-    monkeypatch.setattr(tasks_mod.db, 'session', _StubSession())
+    monkeypatch.setattr(tasks_mod.db, 'session', _StubSession(fake_task))
 
     heartbeats = {'n': 0}
+    persist_locks = {'n': 0}
 
     def _fake_transition(task_id, from_statuses, **values):
         if task_id != 42:
@@ -696,8 +884,12 @@ def test_create_export_file_heartbeat_continues_on_lock(app, monkeypatch):
         if values.get('status') == 'RUNNING' and 'PENDING' in from_statuses:
             fake_task.status = 'RUNNING'
             return True
-        # Heartbeat: RUNNING -> RUNNING — raise lock once, then succeed
         if from_statuses == ['RUNNING'] and values.get('status') == 'RUNNING':
+            # Pre-write file_path persist carries file_path; heartbeats don't.
+            if 'file_path' in values:
+                persist_locks['n'] += 1
+                raise sqlite3.OperationalError('database is locked')
+            # Heartbeat: RUNNING -> RUNNING — raise lock once, then succeed
             heartbeats['n'] += 1
             if heartbeats['n'] == 1:
                 raise sqlite3.OperationalError('database is locked')
@@ -741,6 +933,7 @@ def test_create_export_file_heartbeat_continues_on_lock(app, monkeypatch):
     )
 
     assert fake_task.status == 'SUCCESS'
+    assert persist_locks['n'] == 1
     assert heartbeats['n'] >= 1
     after = {p.name for p in exports_dir.iterdir()}
     new_files = after - before
